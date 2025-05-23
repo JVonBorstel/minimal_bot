@@ -609,6 +609,23 @@ class Config:
         self.LLM_MAX_HISTORY_ITEMS = self.settings.llm_max_history_items
         self.MAX_CONSECUTIVE_TOOL_CALLS = self.settings.max_consecutive_tool_calls
         
+        # Backward compatibility alias for MAX_HISTORY_MESSAGES
+        self.MAX_HISTORY_MESSAGES = self.settings.llm_max_history_items
+        
+        # Application settings
+        self.MOCK_MODE = self.settings.mock_mode
+        
+        # Service API settings
+        self.PERPLEXITY_API_URL = self.settings.perplexity_api_url
+        self.PERPLEXITY_MODEL = self.settings.perplexity_model
+        self.JIRA_API_EMAIL = self.settings.jira_api_email
+        
+        # Available models reference
+        self.AVAILABLE_PERPLEXITY_MODELS_REF = AVAILABLE_PERPLEXITY_MODELS_REF
+        
+        # Tool executor instance (will be set later during initialization)
+        self.tool_executor_instance = None
+        
         # Bot Framework settings
         self.MICROSOFT_APP_ID = self.settings.MicrosoftAppId
         self.MICROSOFT_APP_PASSWORD = self.settings.MicrosoftAppPassword
@@ -775,6 +792,16 @@ class Config:
         
         log.warning(f"No system prompt found for persona: {persona_name}. Using default.")
         return self.DEFAULT_SYSTEM_PROMPT
+    
+    @property
+    def MAX_HISTORY_MESSAGES(self) -> int:
+        """Alias for LLM_MAX_HISTORY_ITEMS, used for backward compatibility."""
+        return self.settings.llm_max_history_items
+    
+    @MAX_HISTORY_MESSAGES.setter
+    def MAX_HISTORY_MESSAGES(self, value: int) -> None:
+        """Setter for MAX_HISTORY_MESSAGES to support testing."""
+        self.settings.llm_max_history_items = value
 
 
 # Global configuration instance

@@ -9,7 +9,8 @@ import os
 from importlib import import_module
 
 # Renamed 'state' to 'state_models' as per project structure and migration plan
-from state_models import AppState, ScratchpadEntry  # Corrected import
+from state_models import AppState, ScratchpadEntry, Message  # Corrected import
+from bot_core.message_handler import SafeTextPart
 # Removed: from llm_interface import glm  # For glm.glm.Content, glm.glm.Part etc.
 
 # --- SDK Types Setup for history_utils ---
@@ -124,7 +125,7 @@ from .constants import (
 # Import AppState and Message models from state_models
 # Simple direct import from parent directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from state_models import AppState, Message
+# Duplicate import removed (AppState, Message already imported above)
 
 # Type alias for LLM SDK content type
 RuntimeContentType = Union[Dict[str, Any], glm.Content] # glm.Content or dicts
@@ -810,12 +811,26 @@ def _reset_conversation_if_broken(
 
     if should_reset:
         user_facing_error_summary = f"Sorry, there was an issue with our conversation flow ({matched_pattern_str[:50]}...). I've reset our chat to fix it. Please try your request again."
-        app_state.add_message("assistant", user_facing_error_summary, is_error=True, metadata={"error_type": "HistoryCorruption", "triggering_error": error_message, "matched_pattern": matched_pattern_str})
-        current_messages = app_state.messages
-        app_state.messages = [msg for msg in current_messages if msg.get("role") == "system" and msg.get("message_type") != WORKFLOW_STAGE_MESSAGE_TYPE]
-        app_state.messages.append({"role": "assistant", "content": user_facing_error_summary, "is_error": True, "timestamp": time.time(), "metadata": {"error_type": "HistoryCorruptionSelfNotification"}})
-        app_state.previous_tool_calls = []
-        app_state.scratchpad = []
+        # Preserve existing system messages (excluding workflow stage markers) while ensuring they are Message objects
+        preserved_messages: List[Message] = []
+        for msg in app_state.messages:
+            try:
+                # Support both Message objects and legacy dict structures
+                if isinstance(msg, Message):
+                    if msg.role == "system" and getattr(msg, "message_type", None) != WORKFLOW_STAGE_MESSAGE_TYPE:
+                        preserved_messages.append(msg)
+                elif isinstance(msg, dict):
+                    if msg.get("role") == "system" and msg.get("message_type") != WORKFLOW_STAGE_MESSAGE_TYPE:
+                        preserved_messages.append(Message(role="system", parts=[SafeTextPart(content=str(msg.get("content", "")))]))
+            except Exception:
+                # If any unexpected structure, skip the message to avoid corrupting the new history
+                continue
+
+        # Reset the conversation history to only the preserved system messages
+        app_state.messages = preserved_messages
+
+        # Add the self-notification error message using the standard helper so it's a proper Message object
+        app_state.add_message("assistant", user_facing_error_summary, is_error=True, metadata={"error_type": "HistoryCorruptionSelfNotification"})
 
         if hasattr(app_state, 'active_workflows') and app_state.active_workflows:
             workflow_ids = list(app_state.active_workflows.keys())

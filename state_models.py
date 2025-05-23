@@ -65,24 +65,42 @@ class Message(BaseModel):
     model_config = ConfigDict(extra='forbid', validate_assignment=True)
     
     role: str = Field(description="Role of the message sender")
-    parts: List[SafeTextPart] = Field(default_factory=list, description="Message content parts")
+    parts: List[MessagePart] = Field(default_factory=list, description="Message content parts")
     raw_text: Optional[str] = Field(default=None, description="Original raw text")
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional message metadata")
+    
+    # Add missing fields that history processing expects
+    is_internal: bool = Field(default=False, description="Whether this is an internal message")
+    is_error: bool = Field(default=False, description="Whether this message represents an error")
+    message_type: Optional[str] = Field(default=None, description="Type of message for workflow context")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(default=None, description="Tool calls if this is a model message with tools")
+    tool_call_id: Optional[str] = Field(default=None, description="Tool call ID if this is a tool response")
     
     @model_validator(mode='before')
     @classmethod
     def safe_message_validation(cls, value: Any) -> Dict[str, Any]:
         """Safely handle various message input formats"""
+        from bot_core.message_handler import MessageProcessor
         try:
             # Use our enhanced message processor
             safe_msg = MessageProcessor.safe_parse_message(value)
+            # Convert SafeTextPart to proper TextPart
+            text_parts = []
+            for part in safe_msg.parts:
+                text_parts.append(TextPart(text=part.content, type="text"))
+            
             return {
                 "role": safe_msg.role,
-                "parts": safe_msg.parts,
+                "parts": text_parts,
                 "raw_text": safe_msg.raw_text,
                 "timestamp": datetime.now(),
-                "metadata": {}
+                "metadata": {},
+                "is_internal": False,
+                "is_error": False,
+                "message_type": None,
+                "tool_calls": None,
+                "tool_call_id": None
             }
         except Exception as e:
             log.warning(f"Message validation fallback triggered: {e}")
@@ -90,10 +108,15 @@ class Message(BaseModel):
             text_content = str(value) if value is not None else ""
             return {
                 "role": "user",
-                "parts": [{"content": text_content}],
+                "parts": [TextPart(text=text_content, type="text")],
                 "raw_text": text_content,
                 "timestamp": datetime.now(),
-                "metadata": {}
+                "metadata": {},
+                "is_internal": False,
+                "is_error": False,
+                "message_type": None,
+                "tool_calls": None,
+                "tool_call_id": None
             }
     
     @property
@@ -101,7 +124,11 @@ class Message(BaseModel):
         """Get the message text content safely"""
         if self.raw_text:
             return self.raw_text
-        return "".join(part.content for part in self.parts)
+        text_parts = []
+        for part in self.parts:
+            if hasattr(part, 'type') and part.type == "text":
+                text_parts.append(part.text)
+        return "".join(text_parts)
     
     def get_text_content(self) -> str:
         """Alternative method to get text content"""
@@ -326,7 +353,7 @@ class AppState(BaseModel):
                 fallback_text = f"[Message processing error: {str(content)[:100]}]"
                 fallback_message = Message(
                     role=role,
-                    parts=[SafeTextPart(content=fallback_text)],
+                    parts=[TextPart(text=fallback_text, type="text")],
                     raw_text=fallback_text
                 )
                 self.messages.append(fallback_message)
@@ -644,6 +671,8 @@ class AppState(BaseModel):
             is_error=kwargs.pop("is_error", False),
             is_internal=kwargs.pop("is_internal", False),
             message_type=kwargs.pop("message_type", None),
+            tool_calls=tool_calls if tool_calls else None,
+            tool_call_id=tool_call_id_for_response,
             metadata=kwargs.pop("metadata", {})
         )
         

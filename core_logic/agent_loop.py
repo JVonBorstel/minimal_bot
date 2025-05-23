@@ -30,7 +30,7 @@ from .tool_processing import _execute_tool_calls  # This is async
 
 # Project-level Imports
 # Assuming these top-level modules are in PYTHONPATH or accessible
-from state_models import AppState, WorkflowContext
+from state_models import AppState, WorkflowContext, Message, TextPart
 # from llm_interface import LLMInterface  # This creates a circular import
 from tools.tool_executor import ToolExecutor
 from config import Config
@@ -40,6 +40,9 @@ from workflows.story_builder import handle_story_builder_workflow, STORY_BUILDER
 LLMInterface: TypeAlias = Any  # Will be resolved at runtime
 
 from utils.logging_config import get_logger, start_llm_call, clear_llm_call_id, start_tool_call, clear_tool_call_id
+
+# Added import for SafeTextPart to construct valid system prompt messages
+from bot_core.message_handler import SafeTextPart
 
 log = get_logger("core_logic.agent_loop")
 
@@ -201,12 +204,17 @@ async def start_streaming_response(
             if not app_state.messages or \
                not (app_state.messages[0].role == "system" and \
                     app_state.messages[0].text == system_prompt):
-                app_state.messages.insert(0, {"role": "system", "content": system_prompt})
-                log.info("Prepended system prompt to messages.", extra={"event_type": "system_prompt_prepended"})
+                # Insert a properly structured Message instance instead of a raw dict to avoid attribute errors later
+                system_msg = Message(role="system", parts=[TextPart(text=system_prompt)])
+                app_state.messages.insert(0, system_msg)
+                log.info("Prepended system prompt to messages using Message object.", extra={"event_type": "system_prompt_prepended"})
             elif app_state.messages[0].role == "system" and \
                  app_state.messages[0].text != system_prompt:
-                app_state.messages[0].parts = [SafeTextPart(content=system_prompt)] # Assuming SafeTextPart is the correct type
-                log.info("Updated existing system prompt in messages.", extra={"event_type": "system_prompt_updated"})
+                app_state.messages[0].parts = [TextPart(text=system_prompt)]
+                # Keep raw_text in sync so .text property returns the updated prompt
+                if hasattr(app_state.messages[0], "raw_text"):
+                    app_state.messages[0].raw_text = system_prompt
+                log.info("Updated existing system prompt message content.", extra={"event_type": "system_prompt_updated"})
 
         # Check if this is a help command
         is_help_command = False
@@ -497,7 +505,7 @@ async def start_streaming_response(
                 extra={"event_type": "general_agent_history_preparation_start", "details": {"message_count": len(app_state.messages)}}
             )
             current_llm_history, history_errors = prepare_messages_for_llm_from_appstate(
-                app_state, max_history_items=config.MAX_HISTORY_MESSAGES
+                app_state, config_max_history_items=config.MAX_HISTORY_MESSAGES
             )
             log.debug(
                 "History prepared for LLM.",
