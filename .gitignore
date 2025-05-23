@@ -1,8 +1,136 @@
+# Environment and secrets
 .env
+.env.local
+.env.production
+
+# Python cache and bytecode
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+
+# Database files
 *.sqlite
-*.log
-.pytest_cache/
 *.sqlite-shm
-*.sqlite-wal 
+*.sqlite-wal
+*.db
+
+# Logs
+*.log
+logs/
+startup_log.txt
+bot_integration.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Test files (exclude from production)
+test*.py
+*test*.py
+tests/
+*_test.py
+debug*.py
+*debug*.py
+automated_bot_tester.py
+ultimate_bot_tester.py
+simple_bot_test.py
+test_*.py
+validate_*.py
+check_*.py
+monitor_*.py
+promote_admin.py
+setup_admin.py
+show_my_jira_tickets.py
+integrate_bot_improvements.py
+fix_jira_config.py
+
+# Development tools and scripts
+dump_codebase.py
+llm_codebase_export.py
+codebase_dump.txt
+help_output_sample.txt
+
+# Documentation and reports (not needed at runtime)
+*_REPORT.md
+*_SUMMARY.md
+COMPREHENSIVE_FIX_SUMMARY.md
+FINAL_COMPREHENSIVE_FIX_REPORT.md
+TOOL_RELIABILITY_INVESTIGATION_REPORT.md
+TEST_ORGANIZATION_SUMMARY.md
+LLM_CODEBASE_EXPORT.md
+README.md
+QUICK_START.md
+EASY_HOSTING.md
+DEPLOYMENT_GUIDE.md
+
+# Bot files (these look like test bots)
+*.bot
+Aughie.bot
+Augie-Tester.bot
+asdgasdgasgas.bot
+
+# Data and cache directories (rebuild in production)
+data/
+tool_embeddings.json
+embeddings_cache/
+cache/
+
+# Multiple requirements files (keep only one)
+requirements-minimal.txt
+# Keep only requirements.txt
+
+# Development configuration
+.env.example
+.cursorrules
+pytest.ini
+.pytest_cache/
+
+# Alembic (if not using migrations in production)
+# alembic/
+# alembic.ini
+
+# Railway specific (might already be there)
+railway.toml
+
+# Docker (if not using Docker deployment)
+# Dockerfile
+# docker-compose.yml
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+backup/
+*.bak
+
+# Git files
+.git/
+.gitattributes
+
+# Deployment scripts (if you want to keep them local)
+deploy.ps1
+deploy.sh
+
+# Health check and utility scripts
+health_checks.py
+run_migrations.py
+explore_jira_tickets.py 
