@@ -5,11 +5,13 @@ Run this as soon as you update .env with the new token.
 """
 
 import asyncio
+import pytest # Add pytest
 from config import get_config
 from tools.jira_tools import JiraTools
 from tools.tool_executor import ToolExecutor
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_new_token():
     print("🔑 TESTING NEW SCOPED API TOKEN")
     print("=" * 60)

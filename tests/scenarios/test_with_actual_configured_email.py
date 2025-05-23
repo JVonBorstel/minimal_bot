@@ -5,12 +5,14 @@ Stop being stupid and use the email that's already configured!
 """
 
 import asyncio
+import pytest # Add pytest
 import time
 from config import get_config
 from user_auth.models import UserProfile
 from tools.tool_executor import ToolExecutor
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_with_configured_email():
     print("🎯 TESTING WITH ACTUAL CONFIGURED JIRA EMAIL")
     print("Using the email that's already in your .env file, not dummy data!")

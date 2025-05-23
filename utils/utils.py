@@ -145,136 +145,94 @@ def validate_and_repair_state(state_obj: Any) -> Tuple[bool, List[str]]:
     repairs = []
     is_valid = True
 
-    # Check message sequence consistency
-    message_roles = [
-        msg.get('role') for msg in state_obj.messages if isinstance(
-            msg, dict) and 'role' in msg]
-    for i, (curr, next_role) in enumerate(
-            zip(message_roles, message_roles[1:] + ['user']), 1):
-        # Check for consecutive assistant messages (which should never happen)
-        if curr == 'assistant' and next_role == 'assistant':
-            repairs.append(
-                f"Found consecutive assistant messages at positions {i} and {i+1}. Removed duplicate.")
-            # Find the second assistant message and remove it
-            assistant_count = 0
-            for j, msg in enumerate(state_obj.messages):
-                if msg.get('role') == 'assistant':
-                    assistant_count += 1
-                    if assistant_count == i + 1:  # This is the duplicate
-                        state_obj.messages.pop(j)
-                        break
+    # Import here to avoid circular imports
+    from bot_core.message_handler import MessageProcessor
+    
+    # Helper function to safely get role from message (handles both Message objects and dicts)
+    def get_message_role(msg):
+        try:
+            if hasattr(msg, 'role'):  # Message object
+                return msg.role
+            elif isinstance(msg, dict):
+                return msg.get('role', 'unknown')
+            else:
+                # Fallback - assume it's a user message
+                return 'user'
+        except Exception as e:
+            log.warning(f"Error getting message role: {e}")
+            return 'unknown'
+
+    # Helper function to safely get text content from message
+    def get_message_text(msg):
+        try:
+            return MessageProcessor.safe_get_text(msg)
+        except Exception as e:
+            log.warning(f"Error getting message text: {e}")
+            return str(msg) if msg is not None else ""
+
+    # Validate messages for integrity
+    if hasattr(state_obj, 'messages') and state_obj.messages:
+        log.debug("Validating message integrity...")
+        
+        messages_to_remove = []
+        for i, msg in enumerate(state_obj.messages):
+            try:
+                # Check for text integrity issues
+                text_content = get_message_text(msg)
+                
+                # Detect character splitting issues
+                if not MessageProcessor.validate_text_integrity(text_content):
+                    log.warning(f"Found message with text integrity issues at index {i}")
+                    
+                    # If the text is very long without spaces, it might be character-split
+                    if len(text_content) > 50 and ' ' not in text_content:
+                        log.error(f"Removing malformed message: '{text_content[:50]}...'")
+                        messages_to_remove.append(i)
+                        repairs.append(f"Removed malformed message at index {i}")
+                        is_valid = False
+                        continue
+                
+                # Validate role
+                role = get_message_role(msg)
+                if role not in ['user', 'model', 'system', 'assistant', 'function']:
+                    log.warning(f"Message at index {i} has invalid role: {role}")
+                    # Try to fix the role
+                    if hasattr(msg, 'role'):
+                        msg.role = 'user'  # Default to user
+                    repairs.append(f"Fixed invalid role at message index {i}")
+                    is_valid = False
+                
+            except Exception as e:
+                log.error(f"Error validating message at index {i}: {e}")
+                messages_to_remove.append(i)
+                repairs.append(f"Removed corrupted message at index {i}")
+                is_valid = False
+        
+        # Remove problematic messages (in reverse order to maintain indices)
+        for i in reversed(messages_to_remove):
+            try:
+                del state_obj.messages[i]
+                log.info(f"Removed problematic message at index {i}")
+            except Exception as e:
+                log.error(f"Failed to remove message at index {i}: {e}")
+
+    # Validate session metadata
+    if hasattr(state_obj, 'session_id'):
+        if not state_obj.session_id or not isinstance(state_obj.session_id, str):
+            log.warning("Invalid session_id detected, generating new one")
+            import uuid
+            state_obj.session_id = str(uuid.uuid4())
+            repairs.append("Generated new session_id")
             is_valid = False
 
-    # Check tool execution feedback consistency
-    if state_obj.current_tool_execution_feedback:
-        seen_call_ids = set()
-        duplicate_call_ids = []
-
-        for i, feedback in enumerate(
-                state_obj.current_tool_execution_feedback):
-            call_id = feedback.get('tool_call_id')
-            if call_id:
-                if call_id in seen_call_ids:
-                    duplicate_call_ids.append((i, call_id))
-                else:
-                    seen_call_ids.add(call_id)
-
-        if duplicate_call_ids:
-            # Remove duplicates (keep the last occurrence which usually has the
-            # most up-to-date status)
-            for i, call_id in sorted(duplicate_call_ids, reverse=True):
-                repairs.append(
-                    f"Removed duplicate tool execution feedback for call_id {call_id}")
-                state_obj.current_tool_execution_feedback.pop(i)
-            is_valid = False
-
-    # Check for workflow consistency (example, adjust as per actual workflow logic)
-    # TODO: Refactor workflow validation to use state_obj.active_workflows and WorkflowContext
-    # The following block is for an older state model and will cause AttributeError with v4_bot
-    # if state_obj.current_workflow and not state_obj.workflow_stage:
-    #     repairs_made.append(
-    #         "Detected an active workflow without a stage. Resetting workflow stage to 'initial'."
-    #     )
-    #     state_obj.workflow_stage = "initial"
-    #     is_valid = False
-
-    # Ensure message list integrity
-    valid_messages = []
-    invalid_indices = []
-    for i, msg in enumerate(state_obj.messages):
-        if not isinstance(msg, dict) or 'role' not in msg:
-            invalid_indices.append(i)
-            is_valid = False
-            continue
-
-        # Verify required fields for each role
-        if msg['role'] == 'user':
-            if 'content' not in msg or msg['content'] is None:
-                # Fix: Initialize with empty content for user messages
-                msg['content'] = ""
-                repairs.append(
-                    f"Repaired user message at index {i} with null content")
-                is_valid = False
-
-        if msg['role'] == 'assistant':
-            if ('content' not in msg or msg['content']
-                    is None) and 'tool_calls' not in msg:
-                # Fix: Initialize with empty content for assistant messages
-                # without tool calls
-                msg['content'] = ""
-                repairs.append(
-                    f"Repaired assistant message at index {i} with null content and no tool calls")
-                is_valid = False
-
-        if msg['role'] == 'tool':
-            if ('content' not in msg or msg['content'] is None):
-                # Fix: Initialize with empty content for tool messages that are
-                # missing it
-                msg['content'] = json.dumps(
-                    {"error": "ContentMissing", "message": "Tool response had null content"})
-                repairs.append(
-                    f"Repaired tool message at index {i} with null content")
-                is_valid = False
-
-            if 'name' not in msg:
-                invalid_indices.append(i)
-                is_valid = False
-                continue
-
-        valid_messages.append(msg)
-
-    if invalid_indices:
-        repairs.append(
-            f"Removed {len(invalid_indices)} invalid messages at indices: {invalid_indices}")
-        state_obj.messages = valid_messages
-
-    # Handle potential race conditions in tool execution state
-    if (state_obj.current_status_message and
-        "Executing" in state_obj.current_status_message and
-        not state_obj.current_tool_execution_feedback and
-            state_obj.last_interaction_status == "COMPLETED"):
-        repairs.append(
-            "Detected inconsistent tool execution state. Resetting status.")
-        state_obj.current_status_message = None
+    # Check for message count limits
+    if hasattr(state_obj, 'messages') and len(state_obj.messages) > 1000:
+        log.warning(f"Too many messages ({len(state_obj.messages)}), trimming to last 500")
+        state_obj.messages = state_obj.messages[-500:]
+        repairs.append("Trimmed excessive message history")
         is_valid = False
 
-    # Check scratchpad integrity
-    if state_obj.scratchpad is None:
-        state_obj.scratchpad = []
-        repairs.append("Initialized null scratchpad with empty list")
-        is_valid = False
-
-    # Validate previous tool calls list
-    if not isinstance(state_obj.previous_tool_calls, list):
-        state_obj.previous_tool_calls = []
-        repairs.append(
-            "Reset invalid previous_tool_calls structure to empty list")
-        is_valid = False
-
-    if repairs:
-        log.warning(
-            f"State validation found and repaired {len(repairs)} issues: {repairs}")
-
+    log.debug(f"State validation complete. Valid: {is_valid}, Repairs: {len(repairs)}")
     return is_valid, repairs
 
 
@@ -306,15 +264,36 @@ def sanitize_message_content(
     sanitized_messages = set()
 
     for i, msg in enumerate(state_obj.messages):
+        log.debug(f"Sanitizing message {i}: type={type(msg)}, attributes available: {dir(msg) if not isinstance(msg, dict) else msg.keys()}")
+        if hasattr(msg, 'parts') and isinstance(msg.parts, list) and len(msg.parts) > 0 and hasattr(msg.parts[0], 'text') and isinstance(msg.parts[0].text, str):
+            log.debug(f"Message {i} (Message object with parts) - Part 0 text length: {len(msg.parts[0].text)}")
+        elif isinstance(msg, dict) and "content" in msg and isinstance(msg.get("content"), str):
+            log.debug(f"Message {i} (dict with content key) - Content length: {len(msg['content'])}")
+        else:
+            log.debug(f"Message {i} has unexpected structure or content type. Type: {type(msg)}. Content: {str(msg)[:200]}...")
+
         content_sanitized = False
         metadata_sanitized = False
 
         # Truncate long content
-        if isinstance(
-                msg,
-                dict) and "content" in msg and isinstance(
-                msg["content"],
-                str):
+        # Check for Message object structure first
+        if hasattr(msg, 'parts') and isinstance(msg.parts, list) and len(msg.parts) > 0: # Check if parts exist and is a list
+            part_zero = msg.parts[0]
+            log.debug(f"Message {i}, Part 0 type: {type(part_zero)}")
+            log.debug(f"Message {i}, Part 0 attributes: {dir(part_zero)}")
+            log.debug(f"Message {i}, Part 0 has 'text' attribute: {hasattr(part_zero, 'text')}")
+            log.debug(f"Message {i}, Part 0 has 'content' attribute: {hasattr(part_zero, 'content')}")
+            if hasattr(part_zero, 'content') and isinstance(part_zero.content, str):
+                 log.debug(f"Message {i}, Part 0 content length: {len(part_zero.content)}")
+        
+        if hasattr(msg, 'parts') and isinstance(msg.parts, list) and len(msg.parts) > 0 and \
+           hasattr(msg.parts[0], 'content') and isinstance(msg.parts[0].content, str): # Changed .text to .content
+            if len(msg.parts[0].content) > max_content_length: # Changed .text to .content
+                msg.parts[0].content = msg.parts[0].content[:max_content_length] + \
+                    "... [TRUNCATED]" # Changed .text to .content
+                content_sanitized = True
+        # Fallback to dict structure
+        elif isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
             if len(msg["content"]) > max_content_length:
                 msg["content"] = msg["content"][:max_content_length] + \
                     "... [TRUNCATED]"
@@ -433,33 +412,66 @@ def cleanup_messages(state_obj: Any, keep_last_n: int = 100) -> int:
     Returns:
         int: Number of messages removed
     """
-    if len(state_obj.messages) <= keep_last_n:
+    if not hasattr(state_obj, 'messages') or len(state_obj.messages) <= keep_last_n:
         log.debug("No message cleanup needed, under the limit.")
         return 0
 
-    # Separate system messages and regular messages
-    system_messages = [
-        msg for msg in state_obj.messages if msg.get('role') == 'system']
-    non_system_messages = [
-        msg for msg in state_obj.messages if msg.get('role') != 'system']
+    # Import here to avoid circular imports
+    from bot_core.message_handler import MessageProcessor
 
-    # Keep most recent non-system messages
-    messages_to_keep = non_system_messages[-keep_last_n + len(system_messages):] if len(
-        non_system_messages) > keep_last_n - len(system_messages) else non_system_messages
+    # Helper function to safely get role from message
+    def get_message_role(msg):
+        try:
+            if hasattr(msg, 'role'):  # Message object
+                return msg.role
+            elif isinstance(msg, dict):
+                return msg.get('role', 'user')
+            else:
+                return 'user'  # Default fallback
+        except Exception as e:
+            log.warning(f"Error getting message role during cleanup: {e}")
+            return 'user'
 
-    # Combine system messages with recent messages
-    new_messages = system_messages + messages_to_keep
-
-    # Sort by timestamps if available to maintain chronological order
-    if all('timestamp' in msg for msg in new_messages):
-        new_messages.sort(key=lambda msg: msg.get('timestamp', 0))
-
-    removed_count = len(state_obj.messages) - len(new_messages)
-    state_obj.messages = new_messages
-
-    log.info(
-        f"Cleaned up messages: removed {removed_count}, kept {len(new_messages)}")
-    return removed_count
+    original_count = len(state_obj.messages)
+    
+    try:
+        # Separate system messages from others
+        system_messages = []
+        other_messages = []
+        
+        for msg in state_obj.messages:
+            try:
+                role = get_message_role(msg)
+                if role == 'system':
+                    system_messages.append(msg)
+                else:
+                    other_messages.append(msg)
+            except Exception as e:
+                log.warning(f"Error processing message during cleanup: {e}")
+                # Add to other_messages as fallback
+                other_messages.append(msg)
+        
+        # Keep the last N non-system messages
+        if len(other_messages) > keep_last_n:
+            other_messages = other_messages[-keep_last_n:]
+        
+        # Combine system messages with recent other messages
+        state_obj.messages = system_messages + other_messages
+        
+        removed_count = original_count - len(state_obj.messages)
+        log.info(f"Message cleanup completed. Removed {removed_count} messages, kept {len(state_obj.messages)}")
+        
+        return removed_count
+        
+    except Exception as e:
+        log.error(f"Error during message cleanup: {e}")
+        # Fallback: just keep the last N messages regardless of type
+        if len(state_obj.messages) > keep_last_n:
+            removed = len(state_obj.messages) - keep_last_n
+            state_obj.messages = state_obj.messages[-keep_last_n:]
+            log.warning(f"Fallback cleanup: removed {removed} messages")
+            return removed
+        return 0
 
 
 def optimize_tool_usage_stats(state_obj: Any, keep_top_n: int = 10) -> None:

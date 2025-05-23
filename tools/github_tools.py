@@ -4,10 +4,14 @@ from typing import Dict, Any, List, Optional, Union, Literal
 import datetime
 import asyncio
 
-from github import Github, GithubException, UnknownObjectException, RateLimitExceededException
+from github import Github, GithubException, UnknownObjectException, RateLimitExceededException, Auth
 from github.Repository import Repository
 from github.NamedUser import NamedUser
 from github.Organization import Organization
+from github.Issue import Issue
+from github.IssueComment import IssueComment
+from github.PullRequest import PullRequest
+from github.PullRequestReview import PullRequestReview
 from requests.exceptions import RequestException
 
 from config import Config
@@ -16,7 +20,10 @@ from user_auth.tool_access import requires_permission
 from user_auth.permissions import Permission
 from state_models import AppState
 
-log = logging.getLogger("tools.github")
+# Import get_logger from logging_config
+from utils.logging_config import get_logger
+
+log = get_logger("tools.github") # Use get_logger
 
 MAX_LIST_RESULTS = 25
 MAX_SEARCH_RESULTS = 15
@@ -114,8 +121,9 @@ class GitHubTools:
             
             # Create client using the same configuration as shared clients
             # For now, assume personal tokens are for github.com (not enterprise)
+            auth = Auth.Token(token)
             personal_client = Github(
-                login_or_token=token,
+                auth=auth,
                 timeout=timeout_seconds,
                 retry=3
             )
@@ -147,15 +155,17 @@ class GitHubTools:
         try:
             timeout_seconds = getattr(self.config, 'DEFAULT_API_TIMEOUT_SECONDS', 10)
             if base_url:
+                auth = Auth.Token(token)
                 github_client = Github(
-                    login_or_token=token,
+                    auth=auth,
                     base_url=str(base_url),
                     timeout=timeout_seconds,
                     retry=3
                 )
             else:
+                auth = Auth.Token(token)
                 github_client = Github(
-                    login_or_token=token,
+                    auth=auth,
                     timeout=timeout_seconds,
                     retry=3
                 )
@@ -530,3 +540,480 @@ class GitHubTools:
         except Exception as e:
             log.error(f"GitHub health check failed: Unexpected error - {e}", exc_info=True)
             return {"status": "ERROR", "message": f"Unexpected error during GitHub health check: {str(e)}"}
+
+    @tool(
+        name="github_create_issue",
+        description="Creates a new issue in a specified GitHub repository.",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_ISSUES)
+    async def create_issue(self, app_state: AppState, owner: str, repo: str, title: str, body: Optional[str] = None, labels: Optional[List[str]] = None, assignee: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Creates a new issue in the specified repository.
+        """
+        log.info(f"Attempting to create issue in {owner}/{repo} with title: '{title}'")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            params = {}
+            if body:
+                params['body'] = body
+            if labels:
+                params['labels'] = labels
+            if assignee:
+                params['assignee'] = assignee
+            
+            issue = await asyncio.to_thread(repository.create_issue, title=title, **params)
+            log.info(f"Successfully created issue #{issue.number} in {owner}/{repo}")
+            return {
+                "number": issue.number,
+                "title": issue.title,
+                "state": issue.state,
+                "url": issue.html_url,
+                "assignee": issue.assignee.login if issue.assignee else None,
+                "body": issue.body
+            }
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded creating issue in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) creating issue in {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error creating issue: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error creating issue in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error creating issue: {e}") from e
+
+    @tool(
+        name="github_get_issue_by_number",
+        description="Retrieves details for a specific issue by its number from a repository.",
+    )
+    @requires_permission(Permission.GITHUB_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def get_issue_by_number(self, app_state: AppState, owner: str, repo: str, issue_number: int, **kwargs) -> Dict[str, Any]:
+        """
+        Retrieves details for a specific issue by its number.
+        """
+        log.info(f"Attempting to retrieve issue #{issue_number} from {owner}/{repo}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            issue = await asyncio.to_thread(repository.get_issue, number=issue_number)
+            log.info(f"Successfully retrieved issue #{issue.number} from {owner}/{repo}")
+            return {
+                "number": issue.number,
+                "title": issue.title,
+                "state": issue.state,
+                "url": issue.html_url,
+                "creator": issue.user.login,
+                "assignee": issue.assignee.login if issue.assignee else None,
+                "body": issue.body,
+                "created_at": issue.created_at.isoformat(),
+                "updated_at": issue.updated_at.isoformat(),
+                "comments_count": issue.comments,
+                "labels": [label.name for label in issue.labels],
+            }
+        except UnknownObjectException:
+            log.warning(f"Issue #{issue_number} not found in {owner}/{repo}.")
+            raise RuntimeError(f"Issue #{issue_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded retrieving issue #{issue_number} from {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) retrieving issue #{issue_number} from {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error retrieving issue: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error retrieving issue #{issue_number} from {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error retrieving issue: {e}") from e
+
+    @tool(
+        name="github_create_comment_on_issue",
+        description="Adds a comment to an existing issue in a repository.",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_ISSUES)
+    async def create_comment_on_issue(self, app_state: AppState, owner: str, repo: str, issue_number: int, body: str, **kwargs) -> Dict[str, Any]:
+        """
+        Adds a comment to an existing issue.
+        """
+        log.info(f"Attempting to create comment on issue #{issue_number} in {owner}/{repo}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            issue = await asyncio.to_thread(repository.get_issue, number=issue_number)
+            comment = await asyncio.to_thread(issue.create_comment, body)
+            log.info(f"Successfully created comment ID {comment.id} on issue #{issue_number} in {owner}/{repo}")
+            return {
+                "id": comment.id,
+                "user": comment.user.login,
+                "body": comment.body,
+                "created_at": comment.created_at.isoformat(),
+                "url": comment.html_url,
+            }
+        except UnknownObjectException:
+            log.warning(f"Issue #{issue_number} not found in {owner}/{repo} when trying to create comment.")
+            raise RuntimeError(f"Issue #{issue_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded creating comment on issue #{issue_number} in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) creating comment on issue #{issue_number} in {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error creating comment: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error creating comment on issue #{issue_number} in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error creating comment: {e}") from e
+
+    @tool(
+        name="github_get_issue_comments",
+        description="Retrieves all comments for a specific issue from a repository.",
+    )
+    @requires_permission(Permission.GITHUB_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def get_issue_comments(self, app_state: AppState, owner: str, repo: str, issue_number: int, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Retrieves all comments for a specific issue.
+        """
+        log.info(f"Attempting to retrieve comments for issue #{issue_number} from {owner}/{repo}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            issue = await asyncio.to_thread(repository.get_issue, number=issue_number)
+            comments_paginated = await asyncio.to_thread(issue.get_comments)
+            
+            results = []
+            for comment in comments_paginated:
+                results.append({
+                    "id": comment.id,
+                    "user": comment.user.login,
+                    "body": comment.body,
+                    "created_at": comment.created_at.isoformat(),
+                    "updated_at": comment.updated_at.isoformat(),
+                    "url": comment.html_url,
+                })
+            log.info(f"Successfully retrieved {len(results)} comments for issue #{issue_number} from {owner}/{repo}")
+            return results
+        except UnknownObjectException:
+            log.warning(f"Issue #{issue_number} not found in {owner}/{repo} when trying to retrieve comments.")
+            raise RuntimeError(f"Issue #{issue_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded retrieving comments for issue #{issue_number} from {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) retrieving comments for issue #{issue_number} from {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error retrieving comments: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error retrieving comments for issue #{issue_number} from {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error retrieving comments: {e}") from e
+
+    @tool(
+        name="github_update_issue_state",
+        description="Updates the state of an issue (e.g., 'open' or 'closed').",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_ISSUES)
+    async def update_issue_state(self, app_state: AppState, owner: str, repo: str, issue_number: int, state: Literal["open", "closed"], **kwargs) -> Dict[str, Any]:
+        """
+        Updates the state of an existing issue.
+        """
+        if state not in ["open", "closed"]:
+            raise ValueError("Invalid state. Must be 'open' or 'closed'.")
+
+        log.info(f"Attempting to update state of issue #{issue_number} in {owner}/{repo} to '{state}'")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            issue = await asyncio.to_thread(repository.get_issue, number=issue_number)
+            await asyncio.to_thread(issue.edit, state=state)
+            # Re-fetch to confirm state change, as edit() might not return the full updated object or confirm state directly
+            updated_issue = await asyncio.to_thread(repository.get_issue, number=issue_number)
+            log.info(f"Successfully updated state of issue #{updated_issue.number} to '{updated_issue.state}' in {owner}/{repo}")
+            return {
+                "number": updated_issue.number,
+                "title": updated_issue.title,
+                "state": updated_issue.state,
+                "url": updated_issue.html_url,
+            }
+        except UnknownObjectException:
+            log.warning(f"Issue #{issue_number} not found in {owner}/{repo} when trying to update state.")
+            raise RuntimeError(f"Issue #{issue_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded updating state for issue #{issue_number} in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) updating state for issue #{issue_number} in {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error updating issue state: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error updating state for issue #{issue_number} in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error updating issue state: {e}") from e
+
+    @tool(
+        name="github_create_pull_request",
+        description="Creates a new pull request in a specified GitHub repository.",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_PRS)
+    async def create_pull_request(self, app_state: AppState, owner: str, repo: str, title: str, body: str, head: str, base: str, draft: bool = False, maintainer_can_modify: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Creates a new pull request.
+        Args:
+            app_state: The application state.
+            owner: The owner of the repository.
+            repo: The name of the repository.
+            title: The title of the pull request.
+            body: The body/description of the pull request.
+            head: The name of the branch where your changes are implemented. (e.g., "feature-branch")
+            base: The name of the branch you want the changes pulled into. (e.g., "main" or "develop")
+            draft: Whether the pull request is a draft. Defaults to False.
+            maintainer_can_modify: Whether maintainers can modify the PR. Defaults to True.
+        """
+        log.info(f"Attempting to create pull request in {owner}/{repo}: '{title}' from {head} to {base}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            pr = await asyncio.to_thread(
+                repository.create_pull,
+                title=title,
+                body=body,
+                head=head,
+                base=base,
+                draft=draft,
+                maintainer_can_modify=maintainer_can_modify
+            )
+            log.info(f"Successfully created pull request #{pr.number} in {owner}/{repo}")
+            return {
+                "number": pr.number,
+                "title": pr.title,
+                "state": pr.state,
+                "url": pr.html_url,
+                "user": pr.user.login,
+                "head_branch": pr.head.ref,
+                "base_branch": pr.base.ref,
+                "draft": pr.draft,
+                "mergeable_state": pr.mergeable_state,
+            }
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded creating PR in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            error_message = e.data.get('message', 'Failed')
+            if e.status == 422 and 'errors' in e.data: # More specific error for PR creation
+                error_details = "; ".join([err.get('message', '') for err in e.data['errors'] if err.get('message')])
+                error_message = f"{error_message} Details: {error_details}"
+            log.error(f"GitHub API error ({e.status}) creating PR in {owner}/{repo}: {error_message}", exc_info=True)
+            raise RuntimeError(f"GitHub API error creating PR: {error_message}") from e
+        except Exception as e:
+            log.error(f"Unexpected error creating PR in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error creating PR: {e}") from e
+
+    @tool(
+        name="github_get_pull_request_by_number",
+        description="Retrieves details for a specific pull request by its number.",
+    )
+    @requires_permission(Permission.GITHUB_READ_PRS, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def get_pull_request_by_number(self, app_state: AppState, owner: str, repo: str, pr_number: int, **kwargs) -> Dict[str, Any]:
+        """
+        Retrieves details for a specific pull request.
+        """
+        log.info(f"Attempting to retrieve PR #{pr_number} from {owner}/{repo}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            pr = await asyncio.to_thread(repository.get_pull, number=pr_number)
+            log.info(f"Successfully retrieved PR #{pr.number} from {owner}/{repo}")
+            return {
+                "number": pr.number,
+                "title": pr.title,
+                "state": pr.state, # open, closed
+                "url": pr.html_url,
+                "user": pr.user.login,
+                "body": pr.body,
+                "created_at": pr.created_at.isoformat(),
+                "updated_at": pr.updated_at.isoformat(),
+                "closed_at": pr.closed_at.isoformat() if pr.closed_at else None,
+                "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                "head_branch": pr.head.ref,
+                "base_branch": pr.base.ref,
+                "commits_count": pr.commits,
+                "additions": pr.additions,
+                "deletions": pr.deletions,
+                "changed_files": pr.changed_files,
+                "draft": pr.draft,
+                "merged": pr.merged,
+                "mergeable": pr.mergeable,
+                "mergeable_state": pr.mergeable_state, # e.g., 'clean', 'dirty', 'unknown', 'blocked', 'behind'
+                "merged_by": pr.merged_by.login if pr.merged_by else None,
+                "labels": [label.name for label in pr.labels],
+                "assignees": [assignee.login for assignee in pr.assignees],
+                "reviewers": [reviewer.login for reviewer in pr.requested_reviewers],
+            }
+        except UnknownObjectException:
+            log.warning(f"PR #{pr_number} not found in {owner}/{repo}.")
+            raise RuntimeError(f"PR #{pr_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded retrieving PR #{pr_number} from {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) retrieving PR #{pr_number} from {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error retrieving PR: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error retrieving PR #{pr_number} from {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error retrieving PR: {e}") from e
+
+    @tool(
+        name="github_list_pull_requests",
+        description="Lists pull requests for a repository. Can be filtered by state, base/head branch.",
+    )
+    @requires_permission(Permission.GITHUB_READ_PRS, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def list_pull_requests(self, app_state: AppState, owner: str, repo: str, state: Literal["open", "closed", "all"] = "open", sort: Literal["created", "updated", "popularity", "long-running"] = "created", direction: Literal["asc", "desc"] = "desc", base: Optional[str] = None, head: Optional[str] = None, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Lists pull requests for a repository.
+        """
+        log.info(f"Listing PRs for {owner}/{repo} (state: {state}, sort: {sort} {direction}, base: {base}, head: {head})")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            params = {'state': state, 'sort': sort, 'direction': direction}
+            if base:
+                params['base'] = base
+            if head:
+                params['head'] = head
+            
+            prs_paginated = await asyncio.to_thread(repository.get_pulls, **params)
+            
+            results = []
+            for i, pr in enumerate(prs_paginated):
+                if i >= MAX_LIST_RESULTS: # Using MAX_LIST_RESULTS similar to list_repositories
+                    log.debug(f"MAX_LIST_RESULTS ({MAX_LIST_RESULTS}) reached, stopping PR list iteration.")
+                    break
+                results.append({
+                    "number": pr.number,
+                    "title": pr.title,
+                    "state": pr.state,
+                    "url": pr.html_url,
+                    "user": pr.user.login,
+                    "created_at": pr.created_at.isoformat(),
+                    "updated_at": pr.updated_at.isoformat(),
+                    "head_branch": pr.head.ref,
+                    "base_branch": pr.base.ref,
+                })
+            log.info(f"Successfully retrieved {len(results)} PRs for {owner}/{repo} (max {MAX_LIST_RESULTS}).")
+            return results
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded listing PRs for {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) listing PRs for {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error listing PRs: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error listing PRs for {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error listing PRs: {e}") from e
+
+    @tool(
+        name="github_create_pull_request_review",
+        description="Creates a review for a pull request (e.g., approve, request changes, or comment).",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_PRS) # Requires write access to PRs
+    async def create_pull_request_review(self, app_state: AppState, owner: str, repo: str, pr_number: int, event: Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"], body: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Creates a review for a pull request.
+        Args:
+            event: The review action. Must be one of: "APPROVE", "REQUEST_CHANGES", "COMMENT".
+            body: The review comment body. Required for "COMMENT" and "REQUEST_CHANGES", optional for "APPROVE".
+        """
+        if event not in ["APPROVE", "REQUEST_CHANGES", "COMMENT"]:
+            raise ValueError("Invalid event type. Must be 'APPROVE', 'REQUEST_CHANGES', or 'COMMENT'.")
+        if event in ["REQUEST_CHANGES", "COMMENT"] and not body:
+            raise ValueError(f"Body is required for event type '{event}'.")
+
+        log.info(f"Attempting to create review (event: {event}) on PR #{pr_number} in {owner}/{repo}")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            pr = await asyncio.to_thread(repository.get_pull, number=pr_number)
+            review_params = {}
+            if body:
+                review_params['body'] = body
+            
+            # PyGithub's create_review takes event as a string, and body.
+            # It doesn't directly take commit_id, but it's usually associated with the latest commit on the PR head.
+            review = await asyncio.to_thread(pr.create_review, event=event, **review_params)
+            log.info(f"Successfully created review ID {review.id} (state: {review.state}) on PR #{pr_number} in {owner}/{repo}")
+            return {
+                "id": review.id,
+                "user": review.user.login,
+                "body": review.body,
+                "state": review.state, # e.g., "APPROVED", "CHANGES_REQUESTED", "COMMENTED"
+                "submitted_at": review.submitted_at.isoformat() if review.submitted_at else None,
+                "url": review.html_url,
+            }
+        except UnknownObjectException:
+            log.warning(f"PR #{pr_number} not found in {owner}/{repo} when trying to create review.")
+            raise RuntimeError(f"PR #{pr_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded creating review on PR #{pr_number} in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e:
+            log.error(f"GitHub API error ({e.status}) creating review on PR #{pr_number} in {owner}/{repo}: {e.data.get('message', 'Failed')}", exc_info=True)
+            raise RuntimeError(f"GitHub API error creating review: {e.data.get('message', 'Failed')}") from e
+        except Exception as e:
+            log.error(f"Unexpected error creating review on PR #{pr_number} in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error creating review: {e}") from e
+
+    @tool(
+        name="github_merge_pull_request",
+        description="Merges a pull request.",
+    )
+    @requires_permission(Permission.GITHUB_WRITE_PRS) # Requires write access to PRs
+    async def merge_pull_request(self, app_state: AppState, owner: str, repo: str, pr_number: int, commit_title: Optional[str] = None, commit_message: Optional[str] = None, merge_method: Literal["merge", "squash", "rebase"] = "merge", **kwargs) -> Dict[str, Any]:
+        """
+        Merges an existing pull request.
+        Args:
+            commit_title: Title for the merge commit.
+            commit_message: Extra detail to append to automatic commit message.
+            merge_method: Merge method to use. Can be 'merge', 'squash', or 'rebase'. Defaults to 'merge'.
+        """
+        if merge_method not in ["merge", "squash", "rebase"]:
+            raise ValueError("Invalid merge_method. Must be 'merge', 'squash', or 'rebase'.")
+
+        log.info(f"Attempting to merge PR #{pr_number} in {owner}/{repo} using method '{merge_method}'")
+        repository = await self._get_repo(app_state, owner, repo, **kwargs)
+        try:
+            pr = await asyncio.to_thread(repository.get_pull, number=pr_number)
+            
+            if not pr.mergeable:
+                mergeable_state = pr.mergeable_state
+                log.warning(f"PR #{pr_number} in {owner}/{repo} is not mergeable. State: {mergeable_state}")
+                raise RuntimeError(f"Pull Request #{pr_number} is not mergeable. Current state: {mergeable_state}. Please resolve conflicts or checks.")
+
+            merge_status = await asyncio.to_thread(
+                pr.merge,
+                commit_title=commit_title,
+                commit_message=commit_message,
+                merge_method=merge_method
+            )
+            
+            if merge_status.merged:
+                log.info(f"Successfully merged PR #{pr_number} in {owner}/{repo}. SHA: {merge_status.sha}")
+                return {
+                    "merged": True,
+                    "sha": merge_status.sha,
+                    "message": merge_status.message, # Typically "Pull Request successfully merged"
+                    "pr_number": pr_number,
+                    "url": pr.html_url # URL of the now merged (and likely closed) PR
+                }
+            else:
+                log.error(f"Failed to merge PR #{pr_number} in {owner}/{repo}. Message: {merge_status.message}")
+                raise RuntimeError(f"Failed to merge PR #{pr_number}. Reason: {merge_status.message}")
+
+        except UnknownObjectException:
+            log.warning(f"PR #{pr_number} not found in {owner}/{repo} when trying to merge.")
+            raise RuntimeError(f"PR #{pr_number} not found in {owner}/{repo}.") from None
+        except RateLimitExceededException as e:
+            reset_time_str = datetime.datetime.fromtimestamp(int(e.headers.get('X-RateLimit-Reset', 0))).isoformat() if e.headers.get('X-RateLimit-Reset') else "unknown"
+            log.error(f"GitHub Rate Limit Exceeded merging PR #{pr_number} in {owner}/{repo}. Limit resets around {reset_time_str}.", exc_info=False)
+            raise RuntimeError(f"GitHub API rate limit exceeded. Limit resets around {reset_time_str}.") from e
+        except GithubException as e: # PyGithub often raises GithubException for merge failures (e.g., 405 Method Not Allowed if not mergeable, 409 Conflict)
+            error_message = e.data.get('message', 'Merge failed')
+            log.error(f"GitHub API error ({e.status}) merging PR #{pr_number} in {owner}/{repo}: {error_message}", exc_info=True)
+            if e.status == 405: # Method Not Allowed
+                 raise RuntimeError(f"Cannot merge PR #{pr_number}. It might not be mergeable or already merged/closed. API Message: {error_message}") from e
+            elif e.status == 409: # Conflict
+                 raise RuntimeError(f"Cannot merge PR #{pr_number} due to a conflict. API Message: {error_message}") from e
+            raise RuntimeError(f"GitHub API error merging PR: {error_message}") from e
+        except Exception as e:
+            log.error(f"Unexpected error merging PR #{pr_number} in {owner}/{repo}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error merging PR: {e}") from e
+

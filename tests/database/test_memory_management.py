@@ -19,6 +19,7 @@ from typing import Dict, Any, List, Optional
 
 # Memory monitoring
 import psutil
+import pytest # Add pytest
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -145,6 +146,7 @@ class MemoryLoadTester:
         print(f"{status} {test_name}: {details}")
         logger.info(f"Test result - {test_name}: {'PASS' if success else 'FAIL'} - {details}")
         
+    @pytest.mark.asyncio
     async def test_baseline_memory_usage(self):
         """Establish baseline memory usage."""
         print("📊 TESTING BASELINE MEMORY USAGE")
@@ -188,6 +190,7 @@ class MemoryLoadTester:
             logger.error("Baseline memory test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_heavy_database_operations(self):
         """Test memory usage under heavy database operations."""
         print("💾 TESTING HEAVY DATABASE OPERATIONS")
@@ -279,6 +282,7 @@ class MemoryLoadTester:
             logger.error("Heavy database operations test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_extended_operation_memory_stability(self):
         """Test memory stability over extended operation period."""
         print("⏱️ TESTING EXTENDED OPERATION MEMORY STABILITY")
@@ -374,6 +378,7 @@ class MemoryLoadTester:
             logger.error("Extended operation stability test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_concurrent_memory_operations(self):
         """Test memory behavior under concurrent operations."""
         print("🔄 TESTING CONCURRENT MEMORY OPERATIONS")
@@ -451,6 +456,7 @@ class MemoryLoadTester:
             logger.error("Concurrent memory operations test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_memory_cleanup_and_gc(self):
         """Test memory cleanup and garbage collection."""
         print("🧹 TESTING MEMORY CLEANUP AND GARBAGE COLLECTION")

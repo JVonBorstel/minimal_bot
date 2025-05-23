@@ -1,0 +1,41 @@
+# Cursor AI Assistant Rules
+
+## 🚫 Terminal Usage - DON'T DO THIS SHIT:
+- **NO TERMINAL SPAM**: Don't run multiple terminal commands rapidly when one fails
+- **NO PANIC KILLING**: Don't kill processes without understanding what they are first
+- **NO PORT HOPPING**: Don't immediately try different ports without investigating the issue
+- **NO BACKGROUND-THEN-CHECK**: Don't run commands in background then immediately check if they worked
+- **NO ASSUMING BROKEN**: Don't assume something is broken when it might just be starting up
+- **NO FIXING NON-PROBLEMS**: Don't try to fix things that are already working
+
+## ✅ Terminal Usage - DO THIS INSTEAD:
+- **READ LOGS FIRST**: Always read the full output before taking any action
+- **WAIT FOR STARTUP**: Give processes time to fully start before checking status
+- **UNDERSTAND ERRORS**: Research what an error actually means before attempting fixes
+- **ONE COMMAND AT A TIME**: Let each command complete and breathe before the next
+- **TRUST SUCCESS MESSAGES**: If something says "Running on..." or "SUCCESS" - believe it
+- **MINIMAL VERIFICATION**: Use simple, non-destructive commands to verify status
+
+## 🎯 Debugging Protocol:
+1. **READ** - Examine all available output/logs thoroughly
+2. **UNDERSTAND** - Identify what the actual problem is (if any)
+3. **PLAN** - Think through the minimal steps needed
+4. **EXECUTE** - Take one careful action at a time
+5. **VERIFY** - Check results before proceeding
+
+## 🧠 Success Indicators to Trust:
+- "Running on http://..."
+- "SUCCESS: ..."
+- "✅" or "[OK]" messages
+- "initialized successfully"
+- Port binding messages
+- "Press CTRL+C to quit"
+
+## 💡 When In Doubt:
+- **Step back** and read what's actually happening
+- **Ask the user** what they're experiencing rather than assuming
+- **Celebrate working code** instead of trying to fix it
+- **Less is more** - minimal intervention is usually better
+
+---
+*These rules exist because terminal chaos helps nobody and breaks working things.* 

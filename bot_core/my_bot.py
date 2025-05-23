@@ -10,11 +10,13 @@ import os
 import threading
 import queue
 from contextlib import contextmanager # Added for @contextmanager
-# import importlib.util # No longer directly used here, moved to dynamic import section
 from importlib import import_module as _import_module_for_early_log
 from pydantic import BaseModel # Add this import at the top of the file
 import pprint # For pretty printing dicts during debugging
 import asyncio
+import uuid
+import re # Added for regex operations in commands
+from datetime import datetime
 
 from botbuilder.core import (  # type: ignore
     ActivityHandler,
@@ -43,10 +45,14 @@ from llm_interface import LLMInterface  # Assuming this path
 from tools.tool_executor import ToolExecutor  # Assuming this path
 from core_logic import start_streaming_response, HistoryResetRequiredError
 
+# Import enhanced bot handler for safe message processing
+from bot_core.enhanced_bot_handler import EnhancedBotHandler
+
 # Import user authentication utilities
 from user_auth.utils import get_current_user_profile # Added
 from user_auth.models import UserProfile # Added
 from user_auth.permissions import Permission # Added for command checking
+from workflows.onboarding import OnboardingQuestionType # Added
 
 # Initialize project-light logging FIRST
 # This ensures setup_logging and get_logger are available before the RedisStorage import attempt
@@ -79,8 +85,6 @@ except ImportError:
     logger.info("RedisStorage not found or importable from .redis_storage. Redis will not be available.") # Now logger is defined
 
 # --- Start: Robust import of root utils.py and logging_config ---
-import sys # Ensure sys is imported
-
 _my_bot_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root_dir = os.path.dirname(_my_bot_dir) # This should be Light-MVP root
 
@@ -488,11 +492,9 @@ class SQLiteStorage:
                 error_code = getattr(e, 'sqlite_errorcode', None)
                 if error_code in self.TRANSIENT_ERROR_CODES and retries_left > 0:
                     retries_left -= 1
-                    # wait_time = 0.1 * (2 ** (self.max_retries - retries_left)) * (0.5 + random.random()) # random is not imported
                     wait_time = 0.1 * (2 ** (self.max_retries - retries_left))
                     logger.warning(f"Transient SQLite error {error_code}, retrying in {wait_time:.2f}s. {retries_left} retries left.")
-                    # await asyncio.sleep(wait_time) # Cannot use await in sync function, use time.sleep
-                    time.sleep(wait_time) # time needs to be imported
+                    await asyncio.sleep(wait_time) # Fixed: Use async sleep in async method
                 else:
                     logger.error(f"SQLite error during read: {e}")
                     raise 
@@ -630,7 +632,7 @@ class SQLiteStorage:
                     retries_left -= 1
                     wait_time = 0.1 * (2 ** (self.max_retries - retries_left)) * (0.5 + random.random())
                     logger.warning(f"Transient SQLite error {error_code}, retrying in {wait_time:.2f}s. {retries_left} retries left.")
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"SQLite error during write: {e}")
                     raise
@@ -677,7 +679,7 @@ class SQLiteStorage:
                     retries_left -= 1
                     wait_time = 0.1 * (2 ** (self.max_retries - retries_left)) * (0.5 + random.random())
                     logger.warning(f"Transient SQLite error {error_code}, retrying in {wait_time:.2f}s. {retries_left} retries left.")
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"SQLite error during delete: {e}")
                     raise
@@ -705,6 +707,10 @@ class MyBot(ActivityHandler):
         self.app_config = app_config
         self.llm_interface = LLMInterface(app_config)
         self.tool_executor = ToolExecutor(app_config) # Initialize ToolExecutor
+        
+        # Initialize enhanced bot handler for safe message processing
+        self.enhanced_handler = EnhancedBotHandler()
+        logger.info("Enhanced bot handler initialized for safe message processing")
 
         # --- Storage Initialization based on memory_type --- 
         if app_config.settings.memory_type == "redis" and RedisStorage:
@@ -743,36 +749,43 @@ class MyBot(ActivityHandler):
 
         # Store Pydantic model class for easy instantiation and validation
         self.AppStateModel = AppState
-        logger.info("MyBot initialized with AppStateModel.")
+        logger.info("MyBot initialized.") # Simplified log
 
     async def _get_conversation_data(
         self, turn_context: TurnContext
     ) -> AppState:
         """Gets, migrates, and validates conversation data as AppState."""
-        raw_data = await self.convo_state_accessor.get(
-            turn_context, lambda: None
-        )  # Get raw, could be None or dict
+        # AppState_dict will be the raw dictionary from storage
+        # For Bot Framework, the accessor manages the raw dict <-> object internally to some extent
+        # but we want to ensure we get our Pydantic model instance.
+        app_state_raw_from_storage = await self.convo_state_accessor.get(
+            turn_context, lambda: {} # Return empty dict if not found, AppState will initialize
+        )
 
-        logger.debug(f"_get_conversation_data: Raw data from accessor: {pprint.pformat(raw_data)}")
-        logger.debug(f"_get_conversation_data: Type of raw_data: {type(raw_data)}")
+        # logger.debug(f"_get_conversation_data: Raw data from accessor for conv {turn_context.activity.conversation.id}: {pprint.pformat(app_state_raw_from_storage)}")
+        logger.debug(
+            f"Raw data from accessor for conv {turn_context.activity.conversation.id}",
+            extra={
+                "event_type": "raw_state_accessor_data",
+                "conversation_id": turn_context.activity.conversation.id,
+                "raw_data_type": str(type(app_state_raw_from_storage)),
+                # Avoid dumping potentially huge raw_app_state_raw_from_storage unless specifically needed
+                # "raw_data_preview": pprint.pformat(app_state_raw_from_storage)[:500] + "..." if app_state_raw_from_storage else "None"
+            }
+        )
+        # logger.debug(f"_get_conversation_data: Type of raw_data: {type(app_state_raw_from_storage)}") # Covered by above
 
         app_state_instance: AppState
 
-        # Fix for the list type error: Check if raw_data is a list and use the first item if needed
-        if isinstance(raw_data, list):
-            logger.warning(f"Received list instead of dict from storage: {raw_data}")
-            raw_data = raw_data[0] if raw_data else None
-
-        if raw_data is None:
+        if not app_state_raw_from_storage: # Handles None or empty dict
             logger.info(
-                "No existing conversation state found. "
-                "Initializing fresh AppState."
+                "No existing conversation state found or state is empty. "
+                f"Initializing fresh AppState for conv {turn_context.activity.conversation.id}."
             )
-            # Initialize with defaults from app_config,
-            # similar to old initialize_session_state
             app_state_instance = self.AppStateModel(
+                session_id=turn_context.activity.conversation.id, # Ensure session_id is set
+                # Initialize with defaults from app_config
                 selected_model=self.app_config.GEMINI_MODEL,
-                # Ensure these config attributes exist or provide fallbacks
                 available_personas=getattr(
                     self.app_config, "AVAILABLE_PERSONAS", ["Default"]
                 ),
@@ -782,26 +795,65 @@ class MyBot(ActivityHandler):
                 selected_perplexity_model=getattr(
                     self.app_config, "PERPLEXITY_MODEL", "sonar-pro"
                 ),
-                # Add other essential defaults required by AppState constructor
-                # Ensure version and session_id use their defaults from
-                # AppStateModel if not overridden here
             )
-        else:
+        elif isinstance(app_state_raw_from_storage, AppState):
+            logger.info(f"Accessor returned AppState instance directly for conv {turn_context.activity.conversation.id}. Performing checks and updates.")
+            app_state_instance = app_state_raw_from_storage
+        elif isinstance(app_state_raw_from_storage, dict):
             logger.info(
-                f"Existing conversation state found (type: {type(raw_data)}). "
-                f"Migrating/Validating."
+                f"Existing conversation state (dict) found for conv {turn_context.activity.conversation.id}. "
+                f"Attempting migration/validation."
             )
-            # Ensure raw_data is a dict before passing to migration
-            # Pass raw_data directly, _migrate_state_if_needed now handles AppState instances
-            migrated_data = _migrate_state_if_needed(raw_data)
- 
-            # _migrate_state_if_needed is expected to always return an AppState instance.
-            # If it ever returned a dict, it would indicate an issue in the migration function itself.
-            assert isinstance(migrated_data, AppState), \
-                "_migrate_state_if_needed did not return an AppState instance as expected."
-            app_state_instance = migrated_data
+            try:
+                # Pass raw_data directly, _migrate_state_if_needed now handles dicts and can return AppState
+                migrated_data_or_app_state = _migrate_state_if_needed(app_state_raw_from_storage)
 
-        # Ensure essential config-dependent fields are current if state loaded
+                if isinstance(migrated_data_or_app_state, AppState):
+                    app_state_instance = migrated_data_or_app_state
+                elif isinstance(migrated_data_or_app_state, dict): # if migration returned a dict
+                    app_state_instance = self.AppStateModel(**migrated_data_or_app_state)
+                else: # Should not happen
+                    logger.error(f"Migration returned unexpected type {type(migrated_data_or_app_state)}. Re-initializing AppState for conv {turn_context.activity.conversation.id}.")
+                    app_state_instance = self.AppStateModel(session_id=turn_context.activity.conversation.id)
+
+            except Exception as e:
+                logger.error(f"Error migrating/validating state for conv {turn_context.activity.conversation.id}: {e}. Re-initializing AppState.", exc_info=True)
+                app_state_instance = self.AppStateModel(session_id=turn_context.activity.conversation.id)
+        else:
+            logger.error(f"Loaded state is neither dict nor AppState (type: {type(app_state_raw_from_storage)}). Re-initializing AppState for conv {turn_context.activity.conversation.id}.")
+            app_state_instance = self.AppStateModel(session_id=turn_context.activity.conversation.id)
+
+        # Ensure session_id is correctly set from turn_context if not already
+        if not app_state_instance.session_id and turn_context.activity and turn_context.activity.conversation:
+            app_state_instance.session_id = turn_context.activity.conversation.id
+            logger.debug(f"Set session_id from turn_context: {app_state_instance.session_id}")
+        elif not app_state_instance.session_id:
+            # Fallback if turn_context also doesn't have it (highly unlikely for message activity)
+            app_state_instance.session_id = f"unknown_session_{uuid.uuid4()}"
+            logger.warning(f"Assigned fallback session_id: {app_state_instance.session_id}")
+
+
+        # Log loaded state (once, after all initialization/migration attempts)
+        # logger.debug(f"Loaded AppState for conv {turn_context.activity.conversation.id}: {app_state_instance.model_dump_json(indent=2)}")
+        log_extra_details = {
+            "event_type": "appstate_loaded_summary",
+            "session_id": app_state_instance.session_id,
+            "user_id": app_state_instance.current_user.user_id if app_state_instance.current_user else None,
+            "message_count": len(app_state_instance.messages),
+            "active_workflows_count": len(app_state_instance.active_workflows),
+            "version": app_state_instance.version,
+            "last_interaction_status": app_state_instance.last_interaction_status,
+        }
+        # Optionally add full dump only if a specific debug flag is on
+        if self.app_config.settings.log_detailed_appstate:
+            log_extra_details["full_appstate_dump"] = app_state_instance.model_dump(mode='json')
+
+        logger.debug(
+            f"Loaded AppState for conv {app_state_instance.session_id}. Messages: {len(app_state_instance.messages)}, Workflows: {len(app_state_instance.active_workflows)}",
+            extra=log_extra_details
+        )
+
+        # Ensure essential config-dependent fields are current if state loaded/initialized
         if not app_state_instance.selected_model:
             app_state_instance.selected_model = self.app_config.GEMINI_MODEL
             logger.debug("Default selected_model applied to AppState.")
@@ -866,7 +918,7 @@ class MyBot(ActivityHandler):
         logger.debug(f"_get_conversation_data: Set AppState instance (session_id: {app_state_instance.session_id}) back on turn_context via accessor.")
 
         logger.info(
-            f"AppState ready for turn (version: {app_state_instance.version}, "
+            f"AppState ready for turn (version: {getattr(app_state_instance, 'version', 'unknown')}, "
             f"session_id: {app_state_instance.session_id})."
         )
         return app_state_instance
@@ -878,10 +930,39 @@ class MyBot(ActivityHandler):
         await super().on_turn(turn_context)
 
         # Save any state changes that might have occurred during the turn.
-        # This is important! Without this, state won't persist even
-        # in MemoryStorage across turns.
-        await self.conversation_state.save_changes(turn_context, False)
-        await self.user_state.save_changes(turn_context, False)
+        app_state_to_save = await self.convo_state_accessor.get(turn_context) # Get the latest state object to log before saving
+        if app_state_to_save and isinstance(app_state_to_save, AppState): # Or your AppState model
+             logger.debug(f"Attempting to save AppState for conv {turn_context.activity.conversation.id} at end of on_turn.")
+             # The accessor expects the raw object to be set, Bot Framework handles serialization for supported storage.
+             # If using Pydantic model directly with accessor, it should be fine.
+             await self.convo_state_accessor.set(turn_context, app_state_to_save)
+        elif app_state_to_save: # It's some other dict, set it
+             logger.debug(f"Attempting to save raw dict state for conv {turn_context.activity.conversation.id} at end of on_turn.")
+             await self.convo_state_accessor.set(turn_context, app_state_to_save)
+
+
+        # Forcing save can be useful but also hide issues if state wasn't actually changed.
+        # Sticking to force=False unless explicitly needed.
+        await self.conversation_state.save_changes(turn_context, force=False)
+        await self.user_state.save_changes(turn_context, force=False) # If you use user state
+
+        if app_state_to_save and isinstance(app_state_to_save, AppState):
+            # logger.debug(f"Saved AppState for conv {turn_context.activity.conversation.id} (version: {app_state_to_save.version}, messages: {len(app_state_to_save.messages)})")
+            logger.debug(
+                f"Saved AppState for conv {turn_context.activity.conversation.id}. Version: {app_state_to_save.version}, Messages: {len(app_state_to_save.messages)}",
+                extra={
+                    "event_type": "appstate_saved_summary",
+                    "conversation_id": turn_context.activity.conversation.id,
+                    "appstate_version": app_state_to_save.version,
+                    "message_count": len(app_state_to_save.messages),
+                    "full_appstate_dump_on_save": app_state_to_save.model_dump(mode='json') if self.app_config.settings.log_detailed_appstate else "not_logged"
+                }
+            )
+        elif app_state_to_save: # It was a dict
+             logger.debug(f"Saved raw dict state for conv {turn_context.activity.conversation.id}. Keys: {list(app_state_to_save.keys()) if isinstance(app_state_to_save, dict) else 'N/A'}")
+        else:
+            logger.debug(f"No app_state found on accessor to save at end of on_turn for conv {turn_context.activity.conversation.id}")
+
         logger.debug(f"Saved state for turn: {turn_context.activity.id}")
 
     async def on_members_added_activity(
@@ -901,6 +982,7 @@ class MyBot(ActivityHandler):
                 and turn_context.activity
                 and turn_context.activity.recipient
                 and member.id != turn_context.activity.recipient.id
+                and member.name.lower() != "bot" # Add check for bot name
             ):
                 await turn_context.send_activity(
                     MessageFactory.text(
@@ -948,7 +1030,6 @@ class MyBot(ActivityHandler):
                 # Store the user profile in app state for later access
                 app_state.current_user = user_profile
                 
-                # Enhanced logging with more user details for debugging
                 logger_msg_activity.debug(
                     f"User profile loaded for user {user_profile.user_id} with role {user_profile.assigned_role}",
                     extra={
@@ -964,117 +1045,162 @@ class MyBot(ActivityHandler):
                     }
                 )
                 
-                # --- NEW: Check for onboarding workflow trigger ---
+                # --- Start Onboarding Logic Block ---
                 try:
-                    from workflows.onboarding import OnboardingWorkflow, get_active_onboarding_workflow
+                    from workflows.onboarding import OnboardingWorkflow, get_active_onboarding_workflow, ONBOARDING_QUESTIONS
                     
-                    # Check if user should start onboarding
-                    should_start_onboarding = OnboardingWorkflow.should_trigger_onboarding(user_profile, app_state)
+                    user_text_lower = turn_context.activity.text.lower().strip() if turn_context.activity.text else ""
+                    current_active_onboarding_workflow = get_active_onboarding_workflow(app_state, user_profile.user_id)
+                    onboarding_handler = OnboardingWorkflow(user_profile, app_state)
                     
-                    if should_start_onboarding:
-                        logger_msg_activity.info(
-                            f"Triggering onboarding workflow for new user {user_profile.user_id}",
-                            extra={"event_type": "onboarding_workflow_triggered"}
+                    onboarding_was_skipped_this_turn = False
+
+                    if current_active_onboarding_workflow and user_text_lower == "help":
+                        help_message = (
+                            "You're currently in the onboarding process. You can:\\n"
+                            "- Answer the current question above.\\n"
+                            "- Type 'skip onboarding' to exit this setup at any time."
                         )
+                        await turn_context.send_activity(MessageFactory.text(help_message))
+                        logger_msg_activity.info(f"Provided onboarding-specific help to user {user_profile.user_id}.",
+                                                 extra={"event_type": "onboarding_contextual_help_sent"})
+                        return
+
+                    if current_active_onboarding_workflow:
+                        skip_phrases = ["skip onboarding", "@bot skip onboarding", "skip", "i want to skip", "don't onboard me", "no thanks onboarding"]
+                        explicit_skip_requested = any(phrase == user_text_lower for phrase in skip_phrases)
                         
-                        # Start onboarding workflow
-                        onboarding = OnboardingWorkflow(user_profile, app_state)
-                        workflow = onboarding.start_workflow()
-                        
-                        # Get first onboarding question
-                        first_question_response = onboarding._format_question_response(
-                            onboarding.ONBOARDING_QUESTIONS[0], 
-                            workflow
-                        )
-                        
-                        # Send the first onboarding question
-                        welcome_message = (
-                            f"🎉 **Welcome to the team, {user_profile.display_name}!**\n\n"
-                            f"I'm Augie, your AI assistant. Let me help you get set up with a quick onboarding process.\n\n"
-                            f"**{first_question_response['progress']}** {first_question_response['message']}"
-                        )
-                        
-                        await turn_context.send_activity(MessageFactory.text(welcome_message))
-                        
-                        # Update user profile and save workflow
-                        from user_auth import db_manager
-                        profile_dict = user_profile.model_dump()
-                        db_manager.save_user_profile(profile_dict)
-                        
-                        logger_msg_activity.info(
-                            f"Started onboarding workflow {workflow.workflow_id} for user {user_profile.user_id}",
-                            extra={"event_type": "onboarding_workflow_started", "workflow_id": workflow.workflow_id}
-                        )
-                        return  # End processing here, wait for user's onboarding response
-                    
-                    # Check if user is currently in onboarding
-                    active_onboarding = get_active_onboarding_workflow(app_state, user_profile.user_id)
-                    if active_onboarding:
-                        logger_msg_activity.info(
-                            f"User {user_profile.user_id} is in active onboarding workflow {active_onboarding.workflow_id}",
-                            extra={"event_type": "active_onboarding_detected", "workflow_id": active_onboarding.workflow_id}
-                        )
-                        
-                        # Process their onboarding response
-                        user_input = activity.text.strip() if activity.text else ""
-                        
-                        onboarding = OnboardingWorkflow(user_profile, app_state)
-                        result = onboarding.process_answer(active_onboarding.workflow_id, user_input)
-                        
-                        if result.get("error"):
-                            await turn_context.send_activity(MessageFactory.text(f"❌ {result['error']}"))
-                            return
-                        
-                        if result.get("retry_question"):
-                            await turn_context.send_activity(MessageFactory.text(f"❌ {result['message']}"))
-                            return
-                        
-                        if result.get("completed"):
-                            # Onboarding completed
-                            await turn_context.send_activity(MessageFactory.text(result["message"]))
+                        llm_inferred_skip = False
+                        if not explicit_skip_requested and user_text_lower:
+                            negative_onboarding_phrases = [
+                                "i don't want to do this", "i dont want to do this", "stop this process", 
+                                "exit onboarding", "cancel this setup", "no more questions please",
+                                "let's not do this", "enough questions"
+                            ]
+                            if any(phrase in user_text_lower for phrase in negative_onboarding_phrases):
+                                llm_inferred_skip = True
+                                logger_msg_activity.info(f"LLM-simulated: detected intent to skip onboarding for user {user_profile.user_id} from: '{user_text_lower}'.", extra={"event_type": "onboarding_skip_inferred_simulated_llm"})
+
+                        if explicit_skip_requested or llm_inferred_skip:
+                            event_source = "explicit_command" if explicit_skip_requested else "llm_inference"
+                            logger_msg_activity.info(f"User {user_profile.user_id} requested to skip onboarding ({event_source}). WF: {current_active_onboarding_workflow.workflow_id}.",
+                                                     extra={"event_type": "onboarding_skip_initiated", "source": event_source})
+                            skip_result = onboarding_handler.skip_onboarding(current_active_onboarding_workflow.workflow_id)
                             
-                            # Update user profile with new data
+                            if skip_result.get("success"):
+                                await turn_context.send_activity(MessageFactory.text(skip_result["message"]))
+                                from user_auth import db_manager
+                                from user_auth.utils import invalidate_user_profile_cache
+                                profile_dict = onboarding_handler.user_profile.model_dump()
+                                db_manager.save_user_profile(profile_dict)
+                                # Invalidate cache to ensure fresh profile data is loaded next time
+                                invalidate_user_profile_cache(user_profile.user_id)
+                                logger_msg_activity.info(f"Onboarding successfully skipped ({event_source}) for user {user_profile.user_id}. WF: {current_active_onboarding_workflow.workflow_id}.",
+                                                         extra={"event_type": "onboarding_skipped_successfully", "source": event_source})
+                                current_active_onboarding_workflow = None 
+                                onboarding_was_skipped_this_turn = True
+                                # Save state and return early - don't process "skip" as a regular message
+                                await self.conversation_state.save_changes(turn_context)
+                                await self.user_state.save_changes(turn_context)
+                                return
+                            else:
+                                await turn_context.send_activity(MessageFactory.text(skip_result.get("error", "Could not skip onboarding.")))
+                    
+                    if not onboarding_was_skipped_this_turn:
+                        if current_active_onboarding_workflow:
+                            # New: Check for "why" questions before processing as an answer
+                            meta_question_phrases = ["why?", "why", "why do you need this?", "why do you need this", "what for?", "what for", "what is this for?", "what is this for"]
+                            if user_text_lower in meta_question_phrases:
+                                current_q_index = current_active_onboarding_workflow.data.get("current_question_index", 0)
+                                if 0 <= current_q_index < len(ONBOARDING_QUESTIONS):
+                                    current_onboarding_question_details = ONBOARDING_QUESTIONS[current_q_index]
+                                    explanation = current_onboarding_question_details.help_text
+                                    original_question_text = current_onboarding_question_details.question
+                                    
+                                    if explanation:
+                                        reply_text = f"💡 Good question! I'm asking because: {explanation}"
+                                    else:
+                                        reply_text = "This information helps me tailor my assistance to you better."
+                                    
+                                    # Re-send the original question with the explanation first
+                                    await turn_context.send_activity(MessageFactory.text(reply_text))
+                                    
+                                    # Format the original question again (as it might have choices)
+                                    # We can reuse the _format_question_response logic by temporarily setting the message part
+                                    # For simplicity here, we just resend the question text directly if no choices, 
+                                    # or re-format if it has choices. 
+                                    # A more robust way might be to call _format_question_response after sending the explanation.
+
+                                    # To ensure choices are displayed correctly, re-format the question prompt slightly differently here
+                                    current_progress = f"**{current_active_onboarding_workflow.data.get('current_question_index', 0) + 1}/{current_active_onboarding_workflow.data.get('questions_total', len(ONBOARDING_QUESTIONS))}**"
+                                    question_display_text = f"{current_progress} {original_question_text}"
+                                    if current_onboarding_question_details.choices:
+                                        formatted_choices = "\n".join(f"{i+1}. {choice}" for i, choice in enumerate(current_onboarding_question_details.choices))
+                                        question_display_text += f"\n\n{formatted_choices}"
+                                        if current_onboarding_question_details.question_type == OnboardingQuestionType.MULTI_CHOICE:
+                                            question_display_text += "\n\n*You can select multiple options by number (e.g., '1,3,5') or text*"
+                                    if not current_onboarding_question_details.required:
+                                        question_display_text += "\n\n*Optional - type 'skip' to skip*"
+
+                                    await turn_context.send_activity(MessageFactory.text(question_display_text))
+                                    
+                                    logger_msg_activity.info(f"Provided explanation for onboarding question '{current_onboarding_question_details.key}' to user {user_profile.user_id}.",
+                                                             extra={"event_type": "onboarding_meta_question_answered"})
+                                    return # End turn, user can now answer with context
+
+                            result = onboarding_handler.process_answer(current_active_onboarding_workflow.workflow_id, user_text_lower)
+                            if result.get("error"):
+                                await turn_context.send_activity(MessageFactory.text(f"❌ {result['error']}"))
+                                return
+                            if result.get("retry_question"):
+                                await turn_context.send_activity(MessageFactory.text(f"❌ {result['message']}"))
+                                return
+                            if result.get("completed"):
+                                await turn_context.send_activity(MessageFactory.text(result["message"]))
+                                from user_auth import db_manager 
+                                from user_auth.utils import invalidate_user_profile_cache
+                                profile_dict = onboarding_handler.user_profile.model_dump()
+                                db_manager.save_user_profile(profile_dict)
+                                # Invalidate cache to ensure fresh profile data is loaded next time
+                                invalidate_user_profile_cache(user_profile.user_id)
+                                if result.get("suggested_role"):
+                                    admin_message = (f"\n\n🔒 **Admin Note**: User {user_profile.display_name} "
+                                                     f"completed onboarding and was suggested role **{result['suggested_role']}**. "
+                                                     f"Use `@augie assign role {user_profile.email or user_profile.user_id} {result['suggested_role']}` to update.")
+                                    await turn_context.send_activity(MessageFactory.text(admin_message))
+                                logger_msg_activity.info(f"Completed onboarding for user {user_profile.user_id}",
+                                                         extra={"event_type": "onboarding_completed", "suggested_role": result.get("suggested_role")})
+                            else: 
+                                next_message = f"**{result['progress']}** {result['message']}"
+                                await turn_context.send_activity(MessageFactory.text(next_message))
+                                logger_msg_activity.debug(f"Sent next onboarding question to user {user_profile.user_id}",
+                                                          extra={"event_type": "onboarding_question_sent", "progress": result.get("progress")})
+                                return
+                        elif OnboardingWorkflow.should_trigger_onboarding(user_profile, app_state):
+                            logger_msg_activity.info(f"Triggering onboarding workflow for new user {user_profile.user_id}", extra={"event_type": "onboarding_workflow_triggered"})
+                            workflow = onboarding_handler.start_workflow()
+                            first_question_response = onboarding_handler._format_question_response(ONBOARDING_QUESTIONS[0], workflow)
+                            # MODIFIED WELCOME MESSAGE HERE
+                            welcome_message = (
+                                f"🎉 Hi {user_profile.display_name}, I'm Augie, your AI assistant! "
+                                f"Let's get you set up with a quick onboarding process.\n"
+                                f"(You can type 'skip onboarding' at any time to bypass this.)\n\n"
+                                f"**{first_question_response['progress']}** {first_question_response['message']}"
+                            )
+                            await turn_context.send_activity(MessageFactory.text(welcome_message))
                             from user_auth import db_manager
                             profile_dict = user_profile.model_dump()
                             db_manager.save_user_profile(profile_dict)
-                            
-                            # Suggest role update if applicable
-                            if result.get("suggested_role"):
-                                admin_message = (
-                                    f"\n\n🔒 **Admin Note**: User {user_profile.display_name} "
-                                    f"completed onboarding and was suggested role **{result['suggested_role']}**. "
-                                    f"Use `@augie assign role {user_profile.email or user_profile.user_id} {result['suggested_role']}` to update."
-                                )
-                                await turn_context.send_activity(MessageFactory.text(admin_message))
-                            
-                            logger_msg_activity.info(
-                                f"Completed onboarding for user {user_profile.user_id}",
-                                extra={"event_type": "onboarding_completed", "suggested_role": result.get("suggested_role")}
-                            )
-                            return  # End processing, onboarding complete
-                        
-                        else:
-                            # Continue with next question
-                            next_message = f"**{result['progress']}** {result['message']}"
-                            await turn_context.send_activity(MessageFactory.text(next_message))
-                            
-                            logger_msg_activity.debug(
-                                f"Sent next onboarding question to user {user_profile.user_id}",
-                                extra={"event_type": "onboarding_question_sent", "progress": result.get("progress")}
-                            )
-                            return  # Wait for next response
+                            logger_msg_activity.info(f"Started onboarding workflow {workflow.workflow_id} for user {user_profile.user_id}", extra={"event_type": "onboarding_workflow_started", "workflow_id": workflow.workflow_id})
+                            return 
+
+                except Exception as e_onboarding: # Correctly scoped except for onboarding block
+                    logger_msg_activity.error(f"Error in ONBOARDING LOGIC block: {e_onboarding}", exc_info=True, extra={"event_type": "onboarding_block_error"})
                 
-                except Exception as e:
-                    logger_msg_activity.error(
-                        f"Error in onboarding workflow: {e}",
-                        extra={"event_type": "onboarding_error"},
-                        exc_info=True
-                    )
-                    # Continue with normal bot flow if onboarding fails
+                # --- END Onboarding Logic Block --- 
                 
-                # --- P3A.5.1: Permission-Aware Bot Responses ---
-                # Check if user has minimum required permissions for basic bot interaction
-                if not app_state.has_permission(Permission.BOT_BASIC_ACCESS):
+                # --- Permission-Aware Bot Responses (after onboarding attempt) ---
+                if not app_state.has_permission(Permission.BOT_BASIC_ACCESS): # Moved this check outside onboarding try-except
                     await turn_context.send_activity(MessageFactory.text(
                         "Sorry, you don't have permission to use this bot. Please contact your administrator for access."
                     ))
@@ -1083,8 +1209,8 @@ class MyBot(ActivityHandler):
                         extra={"event_type": "unauthorized_access_attempt"}
                     )
                     return
-            else:
-                # Failed to load or create user profile
+            
+            else: # user_profile is None
                 logger_msg_activity.warning(
                     "Could not load or create user profile for the current turn. Using restricted permissions.",
                     extra={
@@ -1095,248 +1221,218 @@ class MyBot(ActivityHandler):
                         }
                     }
                 )
-                # Set current_user to None, which will cause has_permission checks to fail
-                app_state.current_user = None
-        except Exception as e:
-            # Handle any unexpected errors in the authentication process
+                app_state.current_user = None # Ensure app_state reflects no user
+
+        except Exception as e_user_profile: # Correctly scoped except for the main user profile try block
             logger_msg_activity.error(
-                f"Error loading/creating user profile: {e}",
+                f"Error loading/creating user profile: {e_user_profile}",
                 exc_info=True,
                 extra={
                     "event_type": "user_profile_error",
                     "details": {
                         "activity_id": turn_context.activity.id,
-                        "error": str(e),
+                        "error": str(e_user_profile),
                         "user_id": turn_context.activity.from_property.id if turn_context.activity.from_property else "unknown"
                     }
                 }
             )
-            # Set current_user to None, which will cause has_permission checks to fail
-            app_state.current_user = None
+            app_state.current_user = None # Ensure app_state reflects no user
         # --- End: Integrate User Authentication (P3A.4.1) ---
 
-        # --- Helper function for P3A.5.1: Get available tools based on user permissions ---
-        def get_available_tools_for_user() -> Dict[str, List[Dict[str, str]]]:
-            """
-            Return a dictionary of tool categories and available tools (name and description)
-            based on user permissions. Dynamically loads from ToolExecutor.
-            """
-            if not app_state.current_user or not hasattr(self, 'tool_executor'):
-                return {}
+        # --- Command Handling / Main LLM Interaction ---
+        # (Ensure this part is not reached if a 'return' happened in onboarding)
 
-            available_tools_by_category: Dict[str, List[Dict[str, str]]] = {}
-            
-            tool_definitions = self.tool_executor.get_available_tool_definitions()
-            configured_tool_callables = self.tool_executor.configured_tools
-
-            for tool_def in tool_definitions:
-                tool_name = tool_def.get("name")
-                tool_description = tool_def.get("description", "No description available.")
-                
-                if not tool_name:
-                    continue
-
-                tool_callable = configured_tool_callables.get(tool_name)
-                if not tool_callable:
-                    continue
-
-                required_permission: Optional[Permission] = getattr(tool_callable, '_permission_required', None)
-                fallback_permission: Optional[Permission] = getattr(tool_callable, '_fallback_permission', None) # Get fallback
-
-                can_add_tool = False
-                if required_permission:
-                    if app_state.has_permission(required_permission):
-                        can_add_tool = True
-                    elif fallback_permission and app_state.has_permission(fallback_permission): # Check fallback
-                        can_add_tool = True
-                else: # Tool has no explicit _permission_required, consider it public.
-                    can_add_tool = True
-                
-                if can_add_tool:
-                    category = "Unknown" # Default category
-                    # Infer category from primary permission if available, otherwise from fallback, else General
-                    permission_for_category_inference = required_permission or fallback_permission
-
-                    if permission_for_category_inference:
-                        try:
-                            category_raw = permission_for_category_inference.name.split('_')[0].capitalize()
-                            category_map = {
-                                "Github": "GitHub", "Jira": "Jira", "Greptile": "Code Search",
-                                "Perplexity": "Web Search", "System": "Admin", "Manage": "Admin",
-                                "Bot": "Bot Admin"
-                            }
-                            category = category_map.get(category_raw, category_raw)
-                        except Exception:
-                            logger_msg_activity.warning(f"Could not infer category for permission {permission_for_category_inference.name}", extra={"event_type": "permission_category_inference_failed"})
-                    elif not required_permission and not fallback_permission: # Truly public tool
-                        category = "General Tools"
-
-
-                    if category not in available_tools_by_category:
-                        available_tools_by_category[category] = []
-                    
-                    if not any(t['name'] == tool_name for t in available_tools_by_category[category]):
-                         available_tools_by_category[category].append({"name": tool_name, "description": tool_description})
-                    
-                    if category == "General Tools" and (required_permission or fallback_permission): # Log if it fell into General but had perms
-                        logger_msg_activity.debug(f"Tool '{tool_name}' added to 'General Tools' for help, primary_perm: {required_permission}, fallback_perm: {fallback_permission}.", extra={"event_type": "tool_help_added_general_with_perms"})
-                    elif category != "General Tools" and not required_permission and not fallback_permission: # Log if public tool didn't go to general
-                        logger_msg_activity.debug(f"Public tool '{tool_name}' categorized as '{category}' instead of 'General Tools'.", extra={"event_type": "tool_help_public_miscategorized"})
-
-
-            # Sort categories and tools within categories
-            sorted_categories = {}
-            for cat_name in sorted(available_tools_by_category.keys()):
-                sorted_categories[cat_name] = sorted(available_tools_by_category[cat_name], key=lambda x: x['name'])
-            
-            return sorted_categories
-        # --- End helper function ---
-
-        # --- Start: P3A.5.2 Permission Management Commands ---
-        activity_text_lower = turn_context.activity.text.lower().strip()
+        activity_text_lower = turn_context.activity.text.lower().strip() if turn_context.activity.text else "" 
         command_handled = False
 
+        # --- Helper function for P3A.5.1: Get available tools based on user permissions (already defined above) ---
+        # def get_available_tools_for_user() -> Dict[str, List[Dict[str, str]]]: ...
+
         # Command 0: @bot help / @bot what can you do / @bot commands
-        if activity_text_lower in ["help", "@bot help", "@bot what can you do", "@bot commands"]:
-            command_handled = True
-            
-            # --- START TEMPORARY DEBUGGING FOR TOOL AVAILABILITY ---
-            # try:
-            #     available_tool_names = self.tool_executor.get_available_tool_names()
-            #     if available_tool_names:
-            #         tool_list_str = "\n".join([f"- {name}" for name in available_tool_names])
-            #         debug_message = f"ToolExecutor reports the following tools as available:\n{tool_list_str}"
-            #     else:
-            #         debug_message = "ToolExecutor reports NO tools as available."
-            #     
-            #     # Also check raw definitions count
-            #     raw_definitions = self.tool_executor.get_available_tool_definitions()
-            #     debug_message += f"\n\n(Raw tool definitions count: {len(raw_definitions)})"
-            #
-            # except Exception as e:
-            #     debug_message = f"Error trying to get tool names from ToolExecutor: {str(e)}"
-            # 
-            # await turn_context.send_activity(MessageFactory.text(debug_message))
-            # logger_msg_activity.info(
-            #     f"Temporary debug: Displayed available tools from ToolExecutor. Message: {debug_message}",
-            #     extra={"event_type": "debug_command_executed", "details": {"command": "help_debug_tools"}}
-            # )
-            # --- END TEMPORARY DEBUGGING ---
-
-            # Comment out original help logic for now
-            available_tools = get_available_tools_for_user()
-            help_text_lines = [
-                "I'm your ChatOps assistant. Here's what I can help with based on your access level:",
-                "",
-                "Basic Commands:",
-                "- `@bot help` or `@bot what can you do` - Display this help message.",
-                "- `@bot my role` or `@bot my permissions` - See your current role and permissions.",
-            ]
-            if available_tools:
-                help_text_lines.append("")
-                help_text_lines.append("Available Tool Categories & Commands:")
-                for category, tools_in_category in available_tools.items():
-                    help_text_lines.append(f"\n**{category}**:")
-                    for tool_info in tools_in_category:
-                        help_text_lines.append(f"- `{tool_info['name']}`: {tool_info['description']}")
-            else:
-                help_text_lines.append("\nCurrently, I don't have specific tools available to list for your role, or tool loading failed.")
-
-            if app_state.current_user and app_state.has_permission(Permission.MANAGE_USER_ROLES):
-                help_text_lines.append("")
-                help_text_lines.append("**Admin Commands:**")
-                help_text_lines.append("- `@bot admin view permissions for <user_id>` - View another user's permissions.")
-            
-            await turn_context.send_activity(MessageFactory.text("\n".join(help_text_lines)))
-            logger_msg_activity.info(
-                f"User requested help. Displayed help with {len(available_tools)} tool categories.",
-                extra={
-                    "event_type": "command_executed",
-                    "details": {
-                        "command": "help",
-                        "user_id": app_state.current_user.user_id if app_state.current_user else "unknown",
-                        "role": app_state.current_user.assigned_role if app_state.current_user else "none",
-                        "tool_categories": list(available_tools.keys()) if available_tools else []
-                    }
-                }
-            )
-            
-        # Command 1: @Bot my permissions / @Bot my role
-        if activity_text_lower == "@bot my permissions" or activity_text_lower == "@bot my role":
-            command_handled = True
-            if app_state.current_user:
-                role_name = app_state.current_user.assigned_role
-                # Use app_state.permission_manager to get effective permissions
-                effective_permissions = app_state.permission_manager.get_effective_permissions(app_state.current_user)
-                perm_names = sorted([p.name for p in effective_permissions])
-                
-                response_md = f"Your assigned role is: **{role_name}**.\\n\\n"
-                if perm_names:
-                    response_md += "Your effective permissions include:\\n"
-                    for p_name in perm_names:
-                        response_md += f"- `{p_name}`\\n"
-                else:
-                    response_md += "You have the basic permissions associated with your role."
-                
-                await turn_context.send_activity(MessageFactory.text(response_md))
-                logger_msg_activity.info(
-                    f"User '{app_state.current_user.user_id}' executed 'my permissions' command.",
-                    extra={"event_type": "command_executed", "details": {"command": "my_permissions"}}
-                )
-            else:
-                await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to check your permissions."))
-                logger_msg_activity.warning(
-                    "User tried 'my permissions' command but current_user is None.",
-                    extra={"event_type": "command_failed", "details": {"command": "my_permissions", "reason": "User not identified"}}
-                )
+        # (This is general help, onboarding help is handled above)
+        # Ensure user_profile is available for the get_active_onboarding_workflow check
+        user_is_onboarding = False
+        if app_state.current_user: # Check if current_user is not None
+            # Corrected: Need to import get_active_onboarding_workflow from workflows.onboarding
+            from workflows.onboarding import get_active_onboarding_workflow
+            user_is_onboarding = get_active_onboarding_workflow(app_state, app_state.current_user.user_id) is not None
         
-        # Command 2: @Bot admin view role for <user_id> / @Bot admin view permissions for <user_id>
-        # Using a simple regex to capture the user_id
-        import re 
-        admin_view_match = re.match(r"@bot admin view (?:role|permissions) for (\S+)", activity_text_lower)
-        if admin_view_match:
-            command_handled = True
-            target_user_id = admin_view_match.group(1)
+        # Placeholder for get_available_tools_for_user
+        def get_available_tools_for_user() -> Dict[str, List[Dict[str, str]]]:
+            logger_msg_activity.warning("Placeholder get_available_tools_for_user called. Returning empty dict.")
+            return {}
 
-            if not app_state.current_user:
-                await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to perform this admin command."))
-                logger_msg_activity.warning(
-                    "Admin command 'view role for user' failed: Requesting user not identified.",
-                    extra={"event_type": "admin_command_failed", "details": {"command": "admin_view_role", "reason": "Requesting user not identified"}}
-                )
-            elif not app_state.has_permission(Permission.MANAGE_USER_ROLES): # Using MANAGE_USER_ROLES for this
-                await turn_context.send_activity(MessageFactory.text("Sorry, you don't have permission to view other users' roles/permissions."))
-                logger_msg_activity.warning(
-                    f"User '{app_state.current_user.user_id}' denied access to 'admin view role for {target_user_id}' command.",
-                    extra={"event_type": "admin_command_denied", "details": {"command": "admin_view_role", "requesting_user": app_state.current_user.user_id, "target_user": target_user_id}}
-                )
-            else:
-                # Admin is authorized, proceed to fetch target user
-                from user_auth.db_manager import get_user_profile_by_id # Local import
-                target_user_profile_dict = get_user_profile_by_id(target_user_id)
-
-                if not target_user_profile_dict:
-                    await turn_context.send_activity(MessageFactory.text(f"User '{target_user_id}' not found."))
+        if not user_is_onboarding: # Only show general help if not in active onboarding
+            if activity_text_lower in ["help", "@bot help", "@bot what can you do", "@bot commands"]:
+                command_handled = True
+                available_tools = get_available_tools_for_user() # Ensure this function is accessible or defined earlier
+                help_text_lines = [
+                    "I'm your ChatOps assistant. Here's what I can help with based on your access level:",
+                    "",
+                    "Basic Commands:",
+                    "- `@bot help` or `@bot what can you do` - Display this help message.",
+                    "- `@bot my role` or `@bot my permissions` - See your current role and permissions.",
+                ]
+                if available_tools:
+                    help_text_lines.append("")
+                    help_text_lines.append("Available Tool Categories & Commands:")
+                    for category, tools_in_category in available_tools.items():
+                        help_text_lines.append(f"\n**{category}**:")
+                        for tool_info in tools_in_category:
+                            help_text_lines.append(f"- `{tool_info['name']}`: {tool_info['description']}")
                 else:
-                    target_user = UserProfile(**target_user_profile_dict)
-                    role_name = target_user.assigned_role
-                    # Use app_state.permission_manager as it's already instantiated
-                    effective_permissions = app_state.permission_manager.get_effective_permissions(target_user)
-                    perm_names = sorted([p.name for p in effective_permissions])
+                    help_text_lines.append("\nCurrently, I don't have specific tools available to list for your role, or tool loading failed.")
 
-                    response_md = f"User **{target_user.user_id}** (Display: {target_user.display_name}) has role: **{role_name}**.\\n\\n"
+                if app_state.current_user and app_state.has_permission(Permission.MANAGE_USER_ROLES):
+                    help_text_lines.append("")
+                    help_text_lines.append("**Admin Commands:**")
+                    help_text_lines.append("- `@bot admin view permissions for <user_id>` - View another user's permissions.")
+                
+                await turn_context.send_activity(MessageFactory.text("\n".join(help_text_lines)))
+                logger_msg_activity.info(
+                    f"User requested help. Displayed help with {len(available_tools)} tool categories.",
+                    extra={
+                        "event_type": "command_executed",
+                        "details": {
+                            "command": "help",
+                            "user_id": app_state.current_user.user_id if app_state.current_user else "unknown",
+                            "role": app_state.current_user.assigned_role if app_state.current_user else "none",
+                            "tool_categories": list(available_tools.keys()) if available_tools else []
+                        }
+                    }
+                )
+                
+            # Command 1: @Bot my permissions / @Bot my role
+            if activity_text_lower == "@bot my permissions" or activity_text_lower == "@bot my role":
+                command_handled = True
+                if app_state.current_user:
+                    role_name = app_state.current_user.assigned_role
+                    # Use app_state.permission_manager to get effective permissions
+                    effective_permissions = app_state.permission_manager.get_effective_permissions(app_state.current_user)
+                    perm_names = sorted([p.name for p in effective_permissions])
+                    
+                    response_md = f"Your assigned role is: **{role_name}**.\n\n"
                     if perm_names:
-                        response_md += "Their effective permissions include:\\n"
+                        response_md += "Your effective permissions include:\n"
                         for p_name in perm_names:
-                            response_md += f"- `{p_name}`\\n"
+                            response_md += f"- `{p_name}`\n"
                     else:
-                        response_md += f"They have the basic permissions associated with the {role_name} role."
+                        response_md += "You have the basic permissions associated with your role."
                     
                     await turn_context.send_activity(MessageFactory.text(response_md))
                     logger_msg_activity.info(
-                        f"Admin '{app_state.current_user.user_id}' executed 'admin view role for {target_user_id}'.",
-                        extra={"event_type": "admin_command_executed", "details": {"command": "admin_view_role", "target_user": target_user_id}}
+                        f"User '{app_state.current_user.user_id}' executed 'my permissions' command.",
+                        extra={"event_type": "command_executed", "details": {"command": "my_permissions"}}
                     )
+                else:
+                    await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to check your permissions."))
+                    logger_msg_activity.warning(
+                        "User tried 'my permissions' command but current_user is None.",
+                        extra={"event_type": "command_failed", "details": {"command": "my_permissions", "reason": "User not identified"}}
+                    )
+            
+            # Command 2: @Bot admin view role for <user_id> / @Bot admin view permissions for <user_id>
+            # Using a simple regex to capture the user_id
+            admin_view_match = re.match(r"@bot admin view (?:role|permissions) for (\S+)", activity_text_lower)
+            if admin_view_match:
+                command_handled = True
+                target_user_id = admin_view_match.group(1)
+
+                if not app_state.current_user:
+                    await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to perform this admin command."))
+                    logger_msg_activity.warning(
+                        "Admin command 'view role for user' failed: Requesting user not identified.",
+                        extra={"event_type": "admin_command_failed", "details": {"command": "admin_view_role", "reason": "Requesting user not identified"}}
+                    )
+                elif not app_state.has_permission(Permission.MANAGE_USER_ROLES): # Using MANAGE_USER_ROLES for this
+                    await turn_context.send_activity(MessageFactory.text("Sorry, you don't have permission to view other users' roles/permissions."))
+                    logger_msg_activity.warning(
+                        f"User '{app_state.current_user.user_id}' denied access to 'admin view role for {target_user_id}' command.",
+                        extra={"event_type": "admin_command_denied", "details": {"command": "admin_view_role", "requesting_user": app_state.current_user.user_id, "target_user": target_user_id}}
+                    )
+                else:
+                    # Admin is authorized, proceed to fetch target user
+                    from user_auth.db_manager import get_user_profile_by_id # Local import
+                    target_user_profile_dict = get_user_profile_by_id(target_user_id)
+
+                    if not target_user_profile_dict:
+                        await turn_context.send_activity(MessageFactory.text(f"User '{target_user_id}' not found."))
+                    else:
+                        target_user = UserProfile(**target_user_profile_dict)
+                        role_name = target_user.assigned_role
+                        # Use app_state.permission_manager as it's already instantiated
+                        effective_permissions = app_state.permission_manager.get_effective_permissions(target_user)
+                        perm_names = sorted([p.name for p in effective_permissions])
+
+                        response_md = f"User **{target_user.user_id}** (Display: {target_user.display_name}) has role: **{role_name}**.\n\n"
+                        if perm_names:
+                            response_md += "Their effective permissions include:\n"
+                            for p_name in perm_names:
+                                response_md += f"- `{p_name}`\n"
+                        else:
+                            response_md += f"They have the basic permissions associated with the {role_name} role."
+                        
+                        await turn_context.send_activity(MessageFactory.text(response_md))
+                        logger_msg_activity.info(
+                            f"Admin '{app_state.current_user.user_id}' executed 'admin view role for {target_user_id}'.",
+                            extra={"event_type": "admin_command_executed", "details": {"command": "admin_view_role", "target_user": target_user_id}}
+                        )
+
+        # NEW Command: @bot my preferences / @bot my data
+        my_prefs_commands = [
+            "@bot my preferences", "@bot show my preferences", "@bot my data", 
+            "@bot my settings", "@bot view my preferences", "@bot summarize my preferences"
+        ]
+        if activity_text_lower in my_prefs_commands:
+            command_handled = True
+            if app_state.current_user and app_state.current_user.profile_data:
+                prefs = app_state.current_user.profile_data.get("preferences", {})
+                onboarding_status = app_state.current_user.profile_data.get("onboarding_status", "unknown")
+                completed_at = app_state.current_user.profile_data.get("onboarding_completed_at")
+                skipped_at = app_state.current_user.profile_data.get("onboarding_skipped_at")
+
+                summary_lines = ["Here's a summary of your current preferences:", ""]
+
+                if onboarding_status == "skipped" and skipped_at:
+                    summary_lines.insert(1, f"(Onboarding was skipped on {datetime.fromisoformat(skipped_at).strftime('%Y-%m-%d %H:%M')} UTC)")
+                elif onboarding_status != "skipped" and completed_at: # completed or other status but has completion time
+                    summary_lines.insert(1, f"(Onboarding completed on {datetime.fromisoformat(completed_at).strftime('%Y-%m-%d %H:%M')} UTC)")
+                
+                summary_lines.append(f"👤 Preferred Name: {prefs.get('preferred_name', 'Not set')}")
+                summary_lines.append(f"🎯 Primary Role: {prefs.get('primary_role', 'Not set')}")
+                
+                projects = prefs.get('main_projects', [])
+                summary_lines.append(f"📂 Main Projects: {(', '.join(projects) if projects else 'None specified')}")
+                
+                tools = prefs.get('tool_preferences', [])
+                summary_lines.append(f"🛠️ Tool Preferences: {(', '.join(tools) if tools else 'None specified')}")
+                
+                summary_lines.append(f"💬 Communication Style: {prefs.get('communication_style', 'Default / Not set')}")
+                
+                notifications_enabled = prefs.get('notifications_enabled')
+                notifications_text = "Enabled" if notifications_enabled else ("Disabled" if notifications_enabled is False else "Default (Disabled)")
+                summary_lines.append(f"🔔 Notifications: {notifications_text}")
+                
+                summary_lines.append("\nYou can update these by using the `@augie preferences` command (if available) or by asking to change specific settings.")
+                # Future: "...or by re-running onboarding (this would reset them to defaults before asking)."
+
+                await turn_context.send_activity(MessageFactory.text("\n".join(summary_lines)))
+                logger_msg_activity.info(
+                    f"User '{app_state.current_user.user_id}' executed 'my preferences' command.",
+                    extra={"event_type": "command_executed", "details": {"command": "my_preferences"}}
+                )
+            elif app_state.current_user: # Has profile, but no profile_data or no preferences
+                 await turn_context.send_activity(MessageFactory.text("It seems your preferences haven't been set up yet. You can go through onboarding to set them."))
+                 logger_msg_activity.info(
+                    f"User '{app_state.current_user.user_id}' tried 'my preferences' but no preference data found.",
+                    extra={"event_type": "command_executed_no_data", "details": {"command": "my_preferences"}}
+                )            
+            else: # No current_user
+                await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to show your preferences."))
+                logger_msg_activity.warning(
+                    "User tried 'my preferences' command but current_user is None.",
+                    extra={"event_type": "command_failed", "details": {"command": "my_preferences", "reason": "User not identified"}}
+                )
 
         if command_handled:
             # If a command was handled, we might not want to proceed to the main LLM logic.
@@ -1352,28 +1448,25 @@ class MyBot(ActivityHandler):
             return 
         # --- End: P3A.5.2 Permission Management Commands ---
 
-        # Add user message to AppState
-        if hasattr(app_state, "add_message") and callable(
-            app_state.add_message
-        ):
-            app_state.add_message(
-                role="user",
-                content=turn_context.activity.text,
-                metadata={
-                    "turn_id": turn_context.activity.id,
-                    "channel_id": turn_context.activity.channel_id,
-                    "user_id": (
-                        turn_context.activity.from_property.id
-                        if turn_context.activity.from_property
-                        else None
-                    ),
-                },
-            )
-        else:
-            logger_msg_activity.warning(
-                "AppState missing callable 'add_message' method.",
-                extra={"event_type": "state_warning", "details": {"missing_method": "add_message"}}
-            )
+        # Use enhanced handler for safe message processing instead of direct add_message
+        logger_msg_activity.debug("Processing user input with enhanced handler for safety")
+        success, result = self.enhanced_handler.safe_process_user_input(
+            turn_context.activity.text, 
+            app_state
+        )
+        
+        if not success:
+            # Enhanced handler detected an issue with the message
+            logger_msg_activity.error(f"Enhanced handler rejected user input: {result}")
+            await turn_context.send_activity(MessageFactory.text(
+                f"I'm sorry, but I encountered an issue processing your message: {result}"
+            ))
+            # Save state and return early
+            await self.conversation_state.save_changes(turn_context)
+            await self.user_state.save_changes(turn_context)
+            return
+        
+        logger_msg_activity.info(f"Enhanced handler successfully processed user input: '{result[:50]}{'...' if len(result) > 50 else ''}'")
 
         # Reset turn-specific state if method exists
         if hasattr(app_state, "reset_turn_state") and callable(
@@ -1401,7 +1494,7 @@ class MyBot(ActivityHandler):
 
         accumulated_text_response: List[str] = []
         final_bot_message_sent = False
- 
+     
         # Check if the bot is already processing a request for this session
         if app_state.is_streaming:
             logger_msg_activity.warning(
@@ -1421,7 +1514,7 @@ class MyBot(ActivityHandler):
             # State will be saved in on_turn, including the user message that was just added.
             # The next time the user sends a message (after streaming is false), that new message will be processed.
             return
- 
+     
         try:
             stream = start_streaming_response(  # Async generator
                 app_state=app_state,
@@ -1438,6 +1531,7 @@ class MyBot(ActivityHandler):
                     extra={
                         "event_type": "stream_event_received",
                         "details": {
+                            "session_id": app_state.session_id, # Added for clarity
                             "event_type_from_stream": event_type,
                             "event_content_preview": str(event_content)[:100],
                             "last_activity_id": last_activity_id_to_update,
@@ -1461,38 +1555,46 @@ class MyBot(ActivityHandler):
                             try:
                                 await turn_context.update_activity(activity_to_update)
                                 final_bot_message_sent = True
-                                logger_msg_activity.debug("Updated activity with text_chunk.", extra={"event_type": "activity_updated", "details": {"activity_id": last_activity_id_to_update, "update_type": "text_chunk"}})
+                                logger_msg_activity.debug("Updated activity with text_chunk.", extra={"event_type": "activity_updated", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "update_type": "text_chunk"}})
                             except Exception as update_error:
                                 logger_msg_activity.warning(
                                     "Failed to update activity with text_chunk, falling back to new message.",
                                     exc_info=True,
-                                    extra={"event_type": "activity_update_failed", "details": {"activity_id": last_activity_id_to_update, "error": str(update_error)}}
+                                    extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}}
                                 )
-                                last_activity_id_to_update = None
-                                final_bot_message_sent = False
+                                # Fallback: send as new message if update failed
+                                new_activity_sent_response = await turn_context.send_activity(Activity(type=ActivityTypes.message, text=updated_text))
+                                last_activity_id_to_update = new_activity_sent_response.id if new_activity_sent_response else None
+                                final_bot_message_sent = True
+                                accumulated_text_response = [updated_text] # Reset accumulated for next potential update
                 elif event_type == "status":
                     status_message = f"⏳ Status: {event_content}"
                     if last_activity_id_to_update and not "".join(accumulated_text_response).strip():
                         activity_to_update = Activity(
                             id=last_activity_id_to_update,
-                            type=ActivityTypes.message,
+                            type=ActivityTypes.message, # Ensure it's a message type
                             text=status_message,
                         )
                         try:
                             await turn_context.update_activity(activity_to_update)
-                            final_bot_message_sent = True
-                            logger_msg_activity.debug("Updated activity with status.", extra={"event_type": "activity_updated", "details": {"activity_id": last_activity_id_to_update, "update_type": "status", "status_content": event_content}})
+                            final_bot_message_sent = True # Consider this a message sent
+                            logger_msg_activity.debug("Updated activity with status.", extra={"event_type": "activity_updated", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "update_type": "status", "status_content": event_content}})
                         except Exception as update_error:
                             logger_msg_activity.warning(
                                 "Failed to update status activity, sending new.",
                                 exc_info=True,
-                                extra={"event_type": "activity_update_failed", "details": {"activity_id": last_activity_id_to_update, "error": str(update_error)}}
+                                extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}}
                             )
-                            await turn_context.send_activity(status_message)
+                            # Fallback: send as new message
+                            new_activity_sent_response = await turn_context.send_activity(status_message)
+                            last_activity_id_to_update = new_activity_sent_response.id if new_activity_sent_response else None
                             final_bot_message_sent = True
-                            last_activity_id_to_update = None
-                    else:
-                        logger_msg_activity.info(f"Status update: {event_content}", extra={"event_type": "status_update_logged", "details": {"status_content": event_content}})
+                            # Since status is ephemeral, don't add to accumulated_text_response
+                    else: # If there's already text or no activity to update, send new or log
+                        logger_msg_activity.info(f"Status update: {event_content}", extra={"event_type": "status_update_logged", "details": {"session_id": app_state.session_id, "status_content": event_content}})
+                        # Optionally send as a new message if important enough and not just for logs
+                        # await turn_context.send_activity(MessageFactory.text(status_message))
+                        # For now, just logging if it can't be an update of the placeholder
 
                 elif event_type == "tool_calls":
                     tool_names = [tc.get("function", {}).get("name", "N/A") for tc in (event_content or []) if isinstance(tc, dict)]
@@ -1522,7 +1624,7 @@ class MyBot(ActivityHandler):
                             )
                             final_bot_message_sent = True
                         except Exception as update_error:
-                            logger_msg_activity.warning("Failed to update tool calls activity, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"activity_id": last_activity_id_to_update, "error": str(update_error)}})
+                            logger_msg_activity.warning("Failed to update tool calls activity, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}})
                             await turn_context.send_activity(tool_call_msg)
                             final_bot_message_sent = True
                     else:
@@ -1633,7 +1735,7 @@ class MyBot(ActivityHandler):
                             await turn_context.update_activity(Activity(id=last_activity_id_to_update, type=ActivityTypes.message, text=error_display_msg))
                             final_bot_message_sent = True
                         except Exception as update_error:
-                            logger_msg_activity.warning("Failed to update error activity, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"activity_id": last_activity_id_to_update, "error": str(update_error)}})
+                            logger_msg_activity.warning("Failed to update error activity, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}})
                             await turn_context.send_activity(error_display_msg)
                             final_bot_message_sent = True
                     else:
@@ -1687,10 +1789,10 @@ class MyBot(ActivityHandler):
                         await turn_context.update_activity(Activity(id=last_activity_id_to_update, type=ActivityTypes.message, text=f"🚨 {error_message}"))
                         final_bot_message_sent = True
                     except Exception as update_error:
-                        logger_msg_activity.warning("Failed to update activity with unhandled error message, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"activity_id": last_activity_id_to_update, "error": str(update_error)}})
+                        logger_msg_activity.warning("Failed to update activity with unhandled error message, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}})
                         await turn_context.send_activity(f"🚨 {error_message}")
                         final_bot_message_sent = True
-                        last_activity_id_to_update = None
+                    last_activity_id_to_update = None
                 else:
                     await turn_context.send_activity(f"🚨 {error_message}")
                     final_bot_message_sent = True

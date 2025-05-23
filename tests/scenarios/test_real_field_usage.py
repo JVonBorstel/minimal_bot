@@ -9,6 +9,7 @@ This is NOT about fancy test scenarios. This is about:
 import asyncio
 import time
 from typing import Dict, Any
+import pytest # Add pytest
 
 from config import get_config
 from state_models import AppState
@@ -36,6 +37,7 @@ class RealFieldUsageTest:
         save_user_profile(user_data)
         return UserProfile(**user_data)
         
+    @pytest.mark.asyncio
     async def test_real_conversation(self, user_message: str, user: UserProfile) -> Dict[str, Any]:
         """Test a real conversation like someone would actually have."""
         print(f"\n👤 USER: {user_message}")

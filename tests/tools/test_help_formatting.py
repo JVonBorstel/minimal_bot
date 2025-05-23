@@ -6,6 +6,7 @@ import logging
 import sys
 import os
 import json
+import pytest # Add pytest
 
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("test_help_formatting")
 
+@pytest.mark.asyncio
 async def test_help_response_structure():
     """Test that help tool returns proper structured response."""
     print("🔍 TESTING HELP RESPONSE STRUCTURE")
@@ -87,6 +89,7 @@ async def test_help_response_structure():
         log.error(f"Structure test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_content_quality():
     """Test the quality and completeness of help content."""
     print("\n🔍 TESTING HELP CONTENT QUALITY")
@@ -186,6 +189,7 @@ async def test_help_content_quality():
         log.error(f"Content quality test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_with_topic():
     """Test help tool with topic parameter."""
     print("\n🔍 TESTING HELP WITH TOPIC PARAMETER")
@@ -252,6 +256,7 @@ async def test_help_with_topic():
         log.error(f"Topic test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_readability():
     """Test that help output is readable and well-formatted."""
     print("\n🔍 TESTING HELP OUTPUT READABILITY")

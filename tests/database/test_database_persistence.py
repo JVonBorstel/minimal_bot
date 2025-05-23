@@ -15,6 +15,7 @@ import sys
 import time
 import json
 from typing import Dict, Any, Optional
+import pytest # Add pytest
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,6 +79,7 @@ class PersistenceTester:
             logger.error("Storage initialization failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_extended_conversation_persistence(self):
         """Test that extended conversations persist correctly."""
         print("💬 TESTING EXTENDED CONVERSATION PERSISTENCE")
@@ -174,6 +176,7 @@ class PersistenceTester:
             logger.error("Extended conversation persistence test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_cross_session_state_persistence(self):
         """Test that state persists across multiple sessions."""
         print("🔄 TESTING CROSS-SESSION STATE PERSISTENCE")
@@ -257,6 +260,7 @@ class PersistenceTester:
             logger.error("Cross-session state persistence test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_bot_restart_persistence(self):
         """Test that data survives bot restart (simulated by storage recreation)."""
         print("🔄 TESTING BOT RESTART PERSISTENCE")
@@ -353,6 +357,7 @@ class PersistenceTester:
             logger.error("Bot restart persistence test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_large_state_persistence(self):
         """Test persistence of large state objects."""
         print("📊 TESTING LARGE STATE PERSISTENCE")
@@ -438,6 +443,7 @@ class PersistenceTester:
             logger.error("Large state persistence test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_data_integrity_over_time(self):
         """Test that data maintains integrity over multiple read/write cycles."""
         print("🔍 TESTING DATA INTEGRITY OVER TIME")

@@ -1,9 +1,17 @@
 {
   "name": "Aughie",
   "description": "",
-  "services": [],
+  "services": [
+    {
+      "type": "endpoint",
+      "name": "development",
+      "endpoint": "http://localhost:8501/api/messages",
+      "appId": "",
+      "appPassword": ""
+    }
+  ],
   "padlock": "",
   "version": "2.0",
-  "path": "C:\\Users\\jvonborstel\\Desktop\\Dev Work\\Projects\\InProgress\\Light-MVP\\Aughie.bot",
+  "path": "C:\\Users\\jvonborstel\\Desktop\\Dev Work\\Projects\\minimal_bot\\Aughie.bot",
   "overrides": null
 }

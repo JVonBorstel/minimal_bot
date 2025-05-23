@@ -16,6 +16,7 @@ import time
 import sqlite3
 import threading
 from typing import Dict, Any, Optional
+import pytest # Add pytest
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +57,7 @@ class DatabaseResilienceTester:
         print(f"{status} {test_name}: {details}")
         logger.info(f"Test result - {test_name}: {'PASS' if success else 'FAIL'} - {details}")
         
+    @pytest.mark.asyncio
     async def test_normal_database_operations(self):
         """Establish baseline - normal database operations work."""
         print("📊 TESTING NORMAL DATABASE OPERATIONS BASELINE")
@@ -109,6 +111,7 @@ class DatabaseResilienceTester:
             logger.error("Normal database operations failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_database_corruption_recovery(self):
         """Test handling of database corruption and recovery."""
         print("💥 TESTING DATABASE CORRUPTION RECOVERY")
@@ -194,6 +197,7 @@ class DatabaseResilienceTester:
             logger.error("Database corruption recovery test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_concurrent_access_resilience(self):
         """Test database resilience under concurrent access."""
         print("🔄 TESTING CONCURRENT ACCESS RESILIENCE")
@@ -283,6 +287,7 @@ class DatabaseResilienceTester:
             logger.error("Concurrent access resilience test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_disk_space_exhaustion_handling(self):
         """Test handling of disk space exhaustion."""
         print("💾 TESTING DISK SPACE EXHAUSTION HANDLING")
@@ -356,6 +361,7 @@ class DatabaseResilienceTester:
             logger.error("Disk space exhaustion test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_database_locking_recovery(self):
         """Test recovery from database locking issues."""
         print("🔒 TESTING DATABASE LOCKING RECOVERY")

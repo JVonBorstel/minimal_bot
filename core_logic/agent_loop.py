@@ -21,7 +21,8 @@ from .constants import (
     STATUS_ERROR_INTERNAL,
     TOOL_CALL_ID_PREFIX,
 )
-from .history_utils import _prepare_history_for_llm, HistoryResetRequiredError
+# Updated to use the new history preparation function
+from .history_utils import prepare_messages_for_llm_from_appstate, HistoryResetRequiredError
 from .llm_interactions import (
     _perform_llm_interaction, _prepare_tool_definitions
 )
@@ -195,22 +196,23 @@ async def start_streaming_response(
         log.debug("Initialized flags for new interaction.", extra={"event_type": "agent_loop_flags_reset"})
 
         # Ensure system prompt is in messages if defined and not already first
-        if config.GENERAL_SYSTEM_PROMPT:
+        system_prompt = config.get_system_prompt("Default")  # Use the config method to get system prompt
+        if system_prompt:
             if not app_state.messages or \
-               not (app_state.messages[0].get("role") == "system" and \
-                    app_state.messages[0].get("content") == config.GENERAL_SYSTEM_PROMPT):
-                app_state.messages.insert(0, {"role": "system", "content": config.GENERAL_SYSTEM_PROMPT})
-                log.info("Prepended GENERAL_SYSTEM_PROMPT to messages.", extra={"event_type": "system_prompt_prepended"})
-            elif app_state.messages[0].get("role") == "system" and \
-                 app_state.messages[0].get("content") != config.GENERAL_SYSTEM_PROMPT:
-                app_state.messages[0]["content"] = config.GENERAL_SYSTEM_PROMPT
-                log.info("Updated existing GENERAL_SYSTEM_PROMPT in messages.", extra={"event_type": "system_prompt_updated"})
+               not (app_state.messages[0].role == "system" and \
+                    app_state.messages[0].text == system_prompt):
+                app_state.messages.insert(0, {"role": "system", "content": system_prompt})
+                log.info("Prepended system prompt to messages.", extra={"event_type": "system_prompt_prepended"})
+            elif app_state.messages[0].role == "system" and \
+                 app_state.messages[0].text != system_prompt:
+                app_state.messages[0].parts = [SafeTextPart(content=system_prompt)] # Assuming SafeTextPart is the correct type
+                log.info("Updated existing system prompt in messages.", extra={"event_type": "system_prompt_updated"})
 
         # Check if this is a help command
         is_help_command = False
         latest_user_message = ""
-        if app_state.messages and app_state.messages[-1].get("role") == "user":
-            latest_user_message = app_state.messages[-1].get("content", "").lower()
+        if app_state.messages and app_state.messages[-1].role == "user":
+            latest_user_message = app_state.messages[-1].text.lower() if app_state.messages[-1].text else ""
             help_keywords = ["help", "what can you do", "show commands", "available tools"]
             is_help_command = any(keyword in latest_user_message for keyword in help_keywords)
 
@@ -231,7 +233,7 @@ async def start_streaming_response(
                 
                 if workflow_result.success:
                     # Add the synthesized result as an assistant message
-                    app_state.add_message("assistant", workflow_result.final_synthesis)
+                    app_state.add_message("assistant", content=workflow_result.final_synthesis)
                     app_state.last_interaction_status = "COMPLETED_OK"
                     
                     yield {'type': 'text_chunk', 'content': workflow_result.final_synthesis}
@@ -264,35 +266,35 @@ async def start_streaming_response(
         if app_state.messages:
             last_assistant_msg_index = -1
             for i in range(len(app_state.messages) - 1, -1, -1):
-                if app_state.messages[i].get("role") == "assistant":
+                if app_state.messages[i].role == "assistant":
                     last_assistant_msg_index = i
                     break
             
             if last_assistant_msg_index != -1:
                 last_assistant_msg = app_state.messages[last_assistant_msg_index]
-                if last_assistant_msg.get("tool_calls"):
+                if last_assistant_msg.tool_calls:
                     log.debug(
                         "Last assistant message has tool_calls. Verifying responses.",
                         extra={
                             "event_type": "unresolved_tool_check_assistant_message",
-                            "details": {"last_assistant_msg_index": last_assistant_msg_index, "tool_call_count": len(last_assistant_msg.get("tool_calls", []))}
+                            "details": {"last_assistant_msg_index": last_assistant_msg_index, "tool_call_count": len(last_assistant_msg.tool_calls)}
                         }
                     )
-                    original_model_tool_calls = last_assistant_msg["tool_calls"]
-                    model_tool_call_ids = {tc["id"] for tc in original_model_tool_calls}
+                    original_model_tool_calls = last_assistant_msg.tool_calls
+                    model_tool_call_ids = {tc.id for tc in original_model_tool_calls}
                     responded_tool_call_ids = set()
                     for i in range(last_assistant_msg_index + 1, len(app_state.messages)):
                         msg = app_state.messages[i]
-                        if msg.get("role") == "tool" and msg.get("tool_call_id") in model_tool_call_ids:
-                            responded_tool_call_ids.add(msg["tool_call_id"])
+                        if msg.role == "tool" and msg.tool_call_id in model_tool_call_ids:
+                            responded_tool_call_ids.add(msg.tool_call_id)
                     pending_tool_call_ids = model_tool_call_ids - responded_tool_call_ids
                     if pending_tool_call_ids:
-                        unresolved_tool_calls_details = [tc for tc in original_model_tool_calls if tc["id"] in pending_tool_call_ids]
+                        unresolved_tool_calls_details = [tc for tc in original_model_tool_calls if tc.id in pending_tool_call_ids]
                         log.info(
                             f"Found {len(unresolved_tool_calls_details)} unresolved tool calls.",
                             extra={
                                 "event_type": "unresolved_tool_calls_found",
-                                "details": {"count": len(unresolved_tool_calls_details), "ids": [tc['id'] for tc in unresolved_tool_calls_details]}
+                                "details": {"count": len(unresolved_tool_calls_details), "ids": [tc.id for tc in unresolved_tool_calls_details]}
                             }
                         )
         if unresolved_tool_calls_details:
@@ -481,7 +483,7 @@ async def start_streaming_response(
                 tool_executor.get_available_tool_definitions(),
                 is_initial_decision_call=is_initial_llm_call_this_cycle,
                 provide_tools=provide_tools_for_this_llm_call,
-                user_query=app_state.messages[-1].get("content") if app_state.messages and app_state.messages[-1].get("role") == "user" else None,
+                user_query=app_state.messages[-1].text if app_state.messages and app_state.messages[-1].role == "user" else None,
                 config=config,
                 app_state=app_state
             )
@@ -494,8 +496,8 @@ async def start_streaming_response(
                 "Preparing history for LLM.",
                 extra={"event_type": "general_agent_history_preparation_start", "details": {"message_count": len(app_state.messages)}}
             )
-            current_llm_history, history_errors = _prepare_history_for_llm(
-                app_state.messages, max_history_items=config.MAX_HISTORY_MESSAGES, app_state=app_state
+            current_llm_history, history_errors = prepare_messages_for_llm_from_appstate(
+                app_state, max_history_items=config.MAX_HISTORY_MESSAGES
             )
             log.debug(
                 "History prepared for LLM.",
@@ -611,7 +613,7 @@ async def start_streaming_response(
             if not current_llm_text_output and not tool_calls_requested_general:
                 log.warning("LLM produced no content or tool calls. Ending turn.", extra={"event_type": "llm_empty_response"})
                 app_state.last_interaction_status = "COMPLETED_EMPTY"
-                if general_agent_cycle_num == 0 and (not app_state.messages or app_state.messages[-1].get("role") != "assistant"):
+                if general_agent_cycle_num == 0 and (not app_state.messages or app_state.messages[-1].role != "assistant"):
                     log.debug("Adding 'LLM returned no response' message to app_state.messages.", extra={"event_type": "add_message_llm_no_response"})
                     app_state.add_message("assistant", "[LLM returned no response]", is_internal=True)
                 break
@@ -876,12 +878,12 @@ async def start_streaming_response(
             else: # LLM provided text and no tool calls
                 tool_executed_successfully_in_previous_cycle = False
                 if current_llm_text_output:
-                    if not app_state.messages or app_state.messages[-1].get("role") != "assistant" or app_state.messages[-1].get("content") != current_llm_text_output:
+                    if not app_state.messages or app_state.messages[-1].role != "assistant" or app_state.messages[-1].text != current_llm_text_output:
                         log.debug(
                             "Adding assistant message with final text to app_state.messages.",
                             extra={"event_type": "add_message_assistant_final_text", "details": {"text_preview": current_llm_text_output[:100]}}
                         )
-                        app_state.add_message("assistant", current_llm_text_output)
+                        app_state.add_message("assistant", content=current_llm_text_output)
                     if app_state.last_interaction_status == STATUS_ERROR_TOOL and not current_llm_text_output:
                         log.info(f"LLM provided no text after non-critical tool errors. Maintaining {STATUS_ERROR_TOOL} status.", extra={"event_type": "llm_no_text_after_tool_error"})
                     else:
@@ -917,12 +919,12 @@ async def start_streaming_response(
             if final_assistant_text_max_cycles: final_assistant_text_max_cycles += f"\n\n[{user_message_max_cycles}]"
             else: final_assistant_text_max_cycles = f"[{user_message_max_cycles}]"
 
-            if not app_state.messages or app_state.messages[-1].get("content") != final_assistant_text_max_cycles:
+            if not app_state.messages or app_state.messages[-1].text != final_assistant_text_max_cycles:
                  log.debug(
                      "Adding max_cycles message to app_state.messages.",
                      extra={"event_type": "add_message_max_cycles", "details": {"text_preview": final_assistant_text_max_cycles[:100]}}
                  )
-                 app_state.add_message("assistant", final_assistant_text_max_cycles)
+                 app_state.add_message("assistant", content=final_assistant_text_max_cycles)
             yield {'type': 'error', 'content': user_message_max_cycles}
             app_state.current_status_message = status_msg_max_cycles
             log.debug("Yielding status for max_cycles.", extra={"event_type": "yield_status_max_cycles", "details": {"status_message": status_msg_max_cycles}})
@@ -941,7 +943,7 @@ async def start_streaming_response(
         app_state.current_status_message = "Conversation History Reset"
         app_state.current_step_error = str(reset_e)
         try:
-            last_msg_content = app_state.messages[-1].get("content", "") if app_state.messages else ""
+            last_msg_content = app_state.messages[-1].text if app_state.messages else ""
             if "history has been reset" not in last_msg_content.lower():
                  log.debug("Adding history reset error message to app_state.messages.", extra={"event_type": "add_message_history_reset_error_agent_loop"})
                  app_state.add_message("assistant", f"[System: {reset_msg_for_user}]", is_error=True)

@@ -50,8 +50,8 @@ class JiraTools:
             self.jira_client = JIRA(
                 options=options,
                 basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
-                timeout=self.config.DEFAULT_API_TIMEOUT_SECONDS,
-                max_retries=0
+                timeout=self.config.settings.default_api_timeout_seconds,
+                max_retries=self.config.settings.default_api_max_retries
             )
             server_info = self.jira_client.server_info()
             log.info(f"Jira client initialized successfully. Connected to: {server_info.get('baseUrl', self.jira_url)}")
@@ -133,7 +133,7 @@ class JiraTools:
                 options=options,
                 basic_auth=(email, token),
                 timeout=timeout_seconds,
-                max_retries=0
+                max_retries=self.config.settings.default_api_max_retries
             )
             
             # Test the client
@@ -225,7 +225,7 @@ class JiraTools:
               "properties": {
                   "user_email": {
                       "type": "string",
-                      "description": "The email address of the user to find assigned issues for."
+                      "description": "The email address of the user to find assigned issues for. If not provided, defaults to the current authenticated user's email."
                   },
                   "status_category": {
                       "type": "string",
@@ -239,18 +239,19 @@ class JiraTools:
                       "default": 15
                   }
               },
-              "required": ["user_email"]
+              "required": []
           }
     )
     @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
-    async def get_issues_by_user(self, app_state: AppState, user_email: str, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
+    async def get_issues_by_user(self, app_state: AppState, user_email: Optional[str] = None, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
         """
         Finds issues assigned to a user by their email address, optionally filtered by status category.
         Now supports personal Jira credentials for enhanced access.
+        If user_email is not provided, it attempts to use the email of the current user in app_state.
 
         Args:
             app_state: Application state containing user profile (injected by tool framework)
-            user_email: The email address of the user.
+            user_email: Optional. The email address of the user. Defaults to current user's email.
             status_category: Optional. Filter by status category: 'to do', 'in progress', 'done'. Defaults to 'to do'.
             max_results: Optional. Maximum number of issues to return. Defaults to 15.
 
@@ -258,13 +259,21 @@ class JiraTools:
             A list of dictionaries, where each dictionary is a summary of an issue
             (key, summary, status, URL, project, type).
         """
-        if not user_email:
+        effective_user_email = user_email
+        if not effective_user_email:
+            if app_state and app_state.current_user and app_state.current_user.email:
+                effective_user_email = app_state.current_user.email
+                log.info(f"User email not provided for get_issues_by_user. Using current user's email: {effective_user_email}")
+            else:
+                raise ValueError("User email not provided and could not be determined from the current user session.")
+
+        if not effective_user_email: # Double check after potential derivation
             raise ValueError("User email cannot be empty.")
 
-        log.info(f"Searching for Jira issues assigned to user: {user_email}, status_category: {status_category}, max_results: {max_results}")
+        log.info(f"Searching for Jira issues assigned to user: {effective_user_email}, status_category: {status_category}, max_results: {max_results}")
 
         try:
-            jql_parts = [f"assignee = \"{user_email}\" OR assignee = currentUser() AND reporter = \"{user_email}\""]
+            jql_parts = [f"assignee = \"{effective_user_email}\" OR assignee = currentUser() AND reporter = \"{effective_user_email}\""]
             if status_category:
                 status_map = {
                     "to do": "To Do",
@@ -281,8 +290,8 @@ class JiraTools:
             log.debug(f"Constructed JQL query: {jql_query}")
 
         except Exception as e:
-            log.error(f"Error constructing JQL for user {user_email}: {e}", exc_info=True)
-            raise RuntimeError(f"Could not construct JQL to find issues for user {user_email}: {e}")
+            log.error(f"Error constructing JQL for user {effective_user_email}: {e}", exc_info=True)
+            raise RuntimeError(f"Could not construct JQL to find issues for user {effective_user_email}: {e}")
 
         try:
             fields_to_retrieve = "summary,status,project,issuetype,assignee,reporter,updated,priority,duedate,labels"
@@ -298,7 +307,7 @@ class JiraTools:
                 fields_to_retrieve
             )
             
-            log.info(f"Found {len(results)} issues for user {user_email} with JQL: {jql_query}")
+            log.info(f"Found {len(results)} issues for user {effective_user_email} with JQL: {jql_query}")
             return results
 
         except JIRAError as e:
@@ -311,20 +320,20 @@ class JiraTools:
                 rate_limit_headers['Retry-After'] = headers.get('Retry-After')
                 rate_limit_headers = {k: v for k, v in rate_limit_headers.items() if v is not None}
                 if rate_limit_headers:
-                    log.warning(f"Jira API error in get_issues_by_user for '{user_email}' (status: {e.status_code}). Rate limit headers: {rate_limit_headers}")
+                    log.warning(f"Jira API error in get_issues_by_user for '{effective_user_email}' (status: {e.status_code}). Rate limit headers: {rate_limit_headers}")
             
             error_text = getattr(e, 'text', str(e))
             if "user" in error_text.lower() and ("does not exist" in error_text.lower() or "not found" in error_text.lower()):
-                 log.warning(f"Jira user with email '{user_email}' might not exist or is not searchable by email directly in JQL for this Jira instance.")
-                 return [] 
+                 log.warning(f"Jira user with email '{effective_user_email}' might not exist or is not searchable by email directly in JQL for this Jira instance. JQL: {jql_query}")
+                 raise RuntimeError(f"The Jira user '{effective_user_email}' was not found or could not be searched. Please check the email address.")
             elif "jql" in error_text.lower():
-                 log.error(f"Jira API JQL error ({e.status_code}) searching issues for user {user_email} with JQL '{jql_query}': {error_text}", exc_info=True)
+                 log.error(f"Jira API JQL error ({e.status_code}) searching issues for user {effective_user_email} with JQL '{jql_query}': {error_text}", exc_info=True)
                  raise RuntimeError(f"Jira JQL query failed (Status: {e.status_code}): {error_text}. Query was: {jql_query}")
             else:
-                 log.error(f"Jira API error ({e.status_code}) searching issues for user {user_email}: {error_text}", exc_info=True)
+                 log.error(f"Jira API error ({e.status_code}) searching issues for user {effective_user_email}: {error_text}", exc_info=True)
                  raise RuntimeError(f"Jira API error ({e.status_code}) searching issues: {error_text}")
         except Exception as e:
-            log.error(f"Unexpected error searching issues for user {user_email}: {e}", exc_info=True)
+            log.error(f"Unexpected error searching issues for user {effective_user_email}: {e}", exc_info=True)
             raise RuntimeError(f"Unexpected error searching issues: {e}")
 
     def health_check(self, app_state: Optional[AppState] = None) -> Dict[str, Any]:
@@ -366,7 +375,7 @@ class JiraTools:
                         options=options,
                         basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
                         timeout=5, 
-                        max_retries=0
+                        max_retries=self.config.settings.default_api_max_retries
                     )
                 except (LibraryJIRAError, RequestException, Exception) as e:
                     log.error(f"(Health Check) Jira client re-initialization failed: {e}")

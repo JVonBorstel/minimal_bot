@@ -21,6 +21,7 @@ import requests
 from typing import Dict, Any, Optional
 import traceback
 from datetime import datetime
+import pytest # Add pytest
 
 # Add our modules to the path
 sys.path.append('.')
@@ -62,9 +63,9 @@ def print_result(result: Dict[str, Any], truncate: bool = True):
     
     print(f"📊 Result: {json.dumps(result, indent=2, default=str)}")
 
-def test_direct_api_access(config) -> bool:
-    """Test direct API access to Greptile before testing tools."""
-    print_test_header("Direct Greptile API Access", 0)
+def _run_direct_api_access_check(config) -> bool:
+    """Checks direct API access to Greptile before testing tools."""
+    print_test_header("Direct Greptile API Access Check", 0)
     
     api_key = config.get_env_value('GREPTILE_API_KEY')
     api_url = config.get_env_value('GREPTILE_API_URL') or "https://api.greptile.com/v2"
@@ -102,6 +103,7 @@ def test_direct_api_access(config) -> bool:
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_greptile_tools():
     """Test all Greptile tools with real API calls."""
     
@@ -124,7 +126,7 @@ async def test_greptile_tools():
         return False
     
     # Test direct API access first
-    if not test_direct_api_access(config):
+    if not _run_direct_api_access_check(config):
         print("❌ Direct API access failed. Cannot proceed with tool tests.")
         return False
     

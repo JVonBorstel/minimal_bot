@@ -73,20 +73,16 @@ def test_onboarding_detection():
         app_state = AppState(session_id="test_detection_1")
         
         should_trigger = OnboardingWorkflow.should_trigger_onboarding(new_user, app_state)
-        if should_trigger:
-            print_success("New user correctly detected for onboarding")
-            success_count += 1
-        else:
-            print_error("New user should trigger onboarding but didn't")
+        assert should_trigger, "New user should trigger onboarding but didn't"
+        print_success("New user correctly detected for onboarding")
+        success_count += 1
         
         # Test 1.2: Existing user should not trigger onboarding
         existing_user = create_test_user("existing_user_001", is_new=False)
         should_trigger = OnboardingWorkflow.should_trigger_onboarding(existing_user, app_state)
-        if not should_trigger:
-            print_success("Existing user correctly skipped onboarding")
-            success_count += 1
-        else:
-            print_error("Existing user should not trigger onboarding but did")
+        assert not should_trigger, "Existing user should not trigger onboarding but did"
+        print_success("Existing user correctly skipped onboarding")
+        success_count += 1
         
         # Test 1.3: User with active onboarding should not retrigger
         new_user_2 = create_test_user("new_user_002", is_new=True)
@@ -101,29 +97,25 @@ def test_onboarding_detection():
         app_state_2.active_workflows[workflow.workflow_id] = workflow
         
         should_trigger = OnboardingWorkflow.should_trigger_onboarding(new_user_2, app_state_2)
-        if not should_trigger:
-            print_success("User with active onboarding correctly skipped retrigger")
-            success_count += 1
-        else:
-            print_error("User with active onboarding should not retrigger but did")
+        assert not should_trigger, "User with active onboarding should not retrigger but did"
+        print_success("User with active onboarding correctly skipped retrigger")
+        success_count += 1
         
         # Test 1.4: User who completed onboarding should not retrigger
         completed_user = create_test_user("completed_user_001", is_new=True)
         completed_user.profile_data = {"onboarding_completed": True}
         
         should_trigger = OnboardingWorkflow.should_trigger_onboarding(completed_user, app_state)
-        if not should_trigger:
-            print_success("User who completed onboarding correctly skipped retrigger")
-            success_count += 1
-        else:
-            print_error("User who completed onboarding should not retrigger but did")
+        assert not should_trigger, "User who completed onboarding should not retrigger but did"
+        print_success("User who completed onboarding correctly skipped retrigger")
+        success_count += 1
         
         print_info(f"Detection tests passed: {success_count}/{total_tests}")
-        return success_count == total_tests
+        assert success_count == total_tests, f"Expected {total_tests} detection successes, got {success_count}"
         
     except Exception as e:
         print_error(f"Error in onboarding detection test: {e}")
-        return False
+        raise  # Re-raise exception to fail the test
 
 def test_workflow_creation():
     """Test 2: Verify workflow creation and initialization."""
@@ -139,57 +131,35 @@ def test_workflow_creation():
         workflow = onboarding.start_workflow()
         
         # Verify workflow properties
-        if workflow.workflow_type == "onboarding":
-            print_success("Workflow type correctly set to 'onboarding'")
-        else:
-            print_error(f"Workflow type incorrect: {workflow.workflow_type}")
-            return False
+        assert workflow.workflow_type == "onboarding", f"Workflow type incorrect: {workflow.workflow_type}"
+        print_success("Workflow type correctly set to 'onboarding'")
         
-        if workflow.status == "active":
-            print_success("Workflow status correctly set to 'active'")
-        else:
-            print_error(f"Workflow status incorrect: {workflow.status}")
-            return False
+        assert workflow.status == "active", f"Workflow status incorrect: {workflow.status}"
+        print_success("Workflow status correctly set to 'active'")
         
-        if workflow.current_stage == "welcome":
-            print_success("Workflow stage correctly set to 'welcome'")
-        else:
-            print_error(f"Workflow stage incorrect: {workflow.current_stage}")
-            return False
+        assert workflow.current_stage == "welcome", f"Workflow stage incorrect: {workflow.current_stage}"
+        print_success("Workflow stage correctly set to 'welcome'")
         
         # Verify workflow data
         data = workflow.data
-        if data.get("user_id") == user.user_id:
-            print_success("User ID correctly stored in workflow data")
-        else:
-            print_error("User ID not stored correctly in workflow data")
-            return False
+        assert data.get("user_id") == user.user_id, "User ID not stored correctly in workflow data"
+        print_success("User ID correctly stored in workflow data")
         
-        if data.get("current_question_index") == 0:
-            print_success("Question index correctly initialized to 0")
-        else:
-            print_error("Question index not initialized correctly")
-            return False
+        assert data.get("current_question_index") == 0, "Question index not initialized correctly"
+        print_success("Question index correctly initialized to 0")
         
-        if data.get("questions_total") == len(ONBOARDING_QUESTIONS):
-            print_success(f"Total questions correctly set to {len(ONBOARDING_QUESTIONS)}")
-        else:
-            print_error("Total questions count incorrect")
-            return False
+        assert data.get("questions_total") == len(ONBOARDING_QUESTIONS), "Total questions count incorrect"
+        print_success(f"Total questions correctly set to {len(ONBOARDING_QUESTIONS)}")
         
         # Verify workflow is added to app state
-        if workflow.workflow_id in app_state.active_workflows:
-            print_success("Workflow correctly added to app_state.active_workflows")
-        else:
-            print_error("Workflow not added to app_state.active_workflows")
-            return False
+        assert workflow.workflow_id in app_state.active_workflows, "Workflow not added to app_state.active_workflows"
+        print_success("Workflow correctly added to app_state.active_workflows")
         
         print_success("All workflow creation tests passed")
-        return True
         
     except Exception as e:
         print_error(f"Error in workflow creation test: {e}")
-        return False
+        raise
 
 def test_question_flow():
     """Test 3: Verify question flow and answer processing."""
@@ -220,50 +190,33 @@ def test_question_flow():
             
             result = onboarding.process_answer(workflow.workflow_id, answer)
             
-            if result.get("error"):
-                print_error(f"Error processing answer {i+1}: {result['error']}")
-                return False
+            assert not result.get("error"), f"Error processing answer {i+1}: {result.get('error')}"
             
-            if result.get("retry_question"):
-                print_error(f"Answer {i+1} rejected: {result['message']}")
-                return False
+            assert not result.get("retry_question"), f"Answer {i+1} rejected: {result.get('message')}"
             
             if result.get("completed"):
                 print_success(f"Onboarding completed after {i+1} answers")
                 break
             
-            if result.get("success"):
-                print_success(f"Answer {i+1} accepted, moving to next question")
-            else:
-                print_error(f"Unexpected result for answer {i+1}: {result}")
-                return False
+            assert result.get("success"), f"Unexpected result for answer {i+1}: {result}"
+            print_success(f"Answer {i+1} accepted, moving to next question")
         
         # Verify completion
-        if workflow.status == "completed":
-            print_success("Workflow status correctly updated to 'completed'")
-        else:
-            print_error(f"Workflow status not updated correctly: {workflow.status}")
-            return False
+        assert workflow.status == "completed", f"Workflow status not updated correctly: {workflow.status}"
+        print_success("Workflow status correctly updated to 'completed'")
         
         # Verify workflow moved to completed
-        if workflow.workflow_id not in app_state.active_workflows:
-            print_success("Workflow correctly removed from active workflows")
-        else:
-            print_error("Workflow not removed from active workflows")
-            return False
+        assert workflow.workflow_id not in app_state.active_workflows, "Workflow not removed from active workflows"
+        print_success("Workflow correctly removed from active workflows")
         
-        if any(wf.workflow_id == workflow.workflow_id for wf in app_state.completed_workflows):
-            print_success("Workflow correctly added to completed workflows")
-        else:
-            print_error("Workflow not added to completed workflows")
-            return False
+        assert any(wf.workflow_id == workflow.workflow_id for wf in app_state.completed_workflows), "Workflow not added to completed workflows"
+        print_success("Workflow correctly added to completed workflows")
         
         print_success("All question flow tests passed")
-        return True
         
     except Exception as e:
         print_error(f"Error in question flow test: {e}")
-        return False
+        raise
 
 def test_data_persistence():
     """Test 4: Verify data is properly stored in user profile."""
@@ -295,21 +248,13 @@ def test_data_persistence():
         
         # Verify profile data was updated
         profile_data = user.profile_data
-        if not profile_data:
-            print_error("Profile data not updated")
-            return False
+        assert profile_data, "Profile data not updated"
         
-        if profile_data.get("onboarding_completed"):
-            print_success("Onboarding completion flag set correctly")
-        else:
-            print_error("Onboarding completion flag not set")
-            return False
+        assert profile_data.get("onboarding_completed"), "Onboarding completion flag not set"
+        print_success("Onboarding completion flag set correctly")
         
-        if profile_data.get("onboarding_completed_at"):
-            print_success("Onboarding completion timestamp recorded")
-        else:
-            print_error("Onboarding completion timestamp not recorded")
-            return False
+        assert profile_data.get("onboarding_completed_at"), "Onboarding completion timestamp not recorded"
+        print_success("Onboarding completion timestamp recorded")
         
         # Verify preferences
         preferences = profile_data.get("preferences", {})
@@ -325,18 +270,14 @@ def test_data_persistence():
         
         for key, expected_value in expected_preferences.items():
             actual_value = preferences.get(key)
-            if actual_value == expected_value:
-                print_success(f"Preference '{key}' stored correctly: {actual_value}")
-            else:
-                print_error(f"Preference '{key}' incorrect. Expected: {expected_value}, Got: {actual_value}")
-                return False
+            assert actual_value == expected_value, f"Preference '{key}' incorrect. Expected: {expected_value}, Got: {actual_value}"
+            print_success(f"Preference '{key}' stored correctly: {actual_value}")
         
         print_success("All data persistence tests passed")
-        return True
         
     except Exception as e:
         print_error(f"Error in data persistence test: {e}")
-        return False
+        raise
 
 def test_answer_validation():
     """Test 5: Verify answer validation works correctly."""
@@ -363,26 +304,22 @@ def test_answer_validation():
             
             # Test valid answer
             validation_result = onboarding._validate_answer(question, valid_answer)
-            if validation_result.get("valid"):
-                print_success(f"Valid answer for {question_type} question accepted: '{valid_answer}'")
-                success_count += 1
-            else:
-                print_error(f"Valid answer for {question_type} question rejected: '{valid_answer}'")
+            assert validation_result.get("valid"), f"Valid answer for {question_type} question rejected: '{valid_answer}'"
+            print_success(f"Valid answer for {question_type} question accepted: '{valid_answer}'")
+            success_count += 1
             
             # Test invalid answer
             validation_result = onboarding._validate_answer(question, invalid_answer)
-            if not validation_result.get("valid"):
-                print_success(f"Invalid answer for {question_type} question rejected: '{invalid_answer}'")
-                success_count += 1
-            else:
-                print_error(f"Invalid answer for {question_type} question accepted: '{invalid_answer}'")
+            assert not validation_result.get("valid"), f"Invalid answer for {question_type} question accepted: '{invalid_answer}'"
+            print_success(f"Invalid answer for {question_type} question rejected: '{invalid_answer}'")
+            success_count += 1
         
         print_info(f"Validation tests passed: {success_count}/{len(validation_tests) * 2}")
-        return success_count == len(validation_tests) * 2
+        assert success_count == len(validation_tests) * 2, f"Expected {len(validation_tests) * 2} validation successes, got {success_count}"
         
     except Exception as e:
         print_error(f"Error in answer validation test: {e}")
-        return False
+        raise
 
 def test_workflow_recovery():
     """Test 6: Verify workflow can be recovered and continued."""
@@ -400,31 +337,20 @@ def test_workflow_recovery():
         
         for answer in first_answers:
             result = onboarding.process_answer(workflow.workflow_id, answer)
-            if result.get("error") or result.get("completed"):
-                print_error(f"Unexpected result during setup: {result}")
-                return False
+            assert not (result.get("error") or result.get("completed")), f"Unexpected result during setup: {result}"
         
         # Verify we can find the active workflow
         active_workflow = get_active_onboarding_workflow(app_state, user.user_id)
-        if active_workflow:
-            print_success("Active onboarding workflow found correctly")
-        else:
-            print_error("Active onboarding workflow not found")
-            return False
+        assert active_workflow, "Active onboarding workflow not found"
+        print_success("Active onboarding workflow found correctly")
         
-        if active_workflow.workflow_id == workflow.workflow_id:
-            print_success("Correct workflow retrieved by user ID")
-        else:
-            print_error("Wrong workflow retrieved")
-            return False
+        assert active_workflow.workflow_id == workflow.workflow_id, "Wrong workflow retrieved"
+        print_success("Correct workflow retrieved by user ID")
         
         # Verify workflow state
         current_index = active_workflow.data.get("current_question_index", 0)
-        if current_index == 2:  # Should be on question 3 (0-indexed)
-            print_success(f"Workflow correctly positioned at question {current_index + 1}")
-        else:
-            print_error(f"Workflow position incorrect: {current_index}")
-            return False
+        assert current_index == 2, f"Workflow position incorrect: {current_index}, expected 2"
+        print_success(f"Workflow correctly positioned at question {current_index + 1}")
         
         # Continue with more answers
         continuing_answers = ["test-project", "1,2", "1", "no", "no"]
@@ -434,16 +360,13 @@ def test_workflow_recovery():
             if result.get("completed"):
                 print_success("Workflow completed successfully after recovery")
                 break
-            elif result.get("error"):
-                print_error(f"Error continuing workflow: {result['error']}")
-                return False
+            assert not result.get("error"), f"Error continuing workflow: {result.get('error')}"
         
         print_success("All workflow recovery tests passed")
-        return True
         
     except Exception as e:
         print_error(f"Error in workflow recovery test: {e}")
-        return False
+        raise
 
 def test_edge_cases():
     """Test 7: Verify edge cases and error handling."""
@@ -459,11 +382,9 @@ def test_edge_cases():
         onboarding = OnboardingWorkflow(user, app_state)
         
         result = onboarding.process_answer("invalid_workflow_id", "test answer")
-        if result.get("error") == "Workflow not found":
-            print_success("Invalid workflow ID correctly handled")
-            success_count += 1
-        else:
-            print_error("Invalid workflow ID not handled correctly")
+        assert result.get("error") == "Workflow not found", "Invalid workflow ID not handled correctly"
+        print_success("Invalid workflow ID correctly handled")
+        success_count += 1
         
         # Test 7.2: Empty/skip answers for optional questions
         workflow = onboarding.start_workflow()
@@ -475,36 +396,49 @@ def test_edge_cases():
         
         # Now skip the projects question
         result = onboarding.process_answer(workflow.workflow_id, "skip")
-        if result.get("success") and not result.get("error"):
-            print_success("Optional question skip handled correctly")
-            success_count += 1
-        else:
-            print_error("Optional question skip not handled correctly")
+        assert result.get("success") and not result.get("error"), "Optional question skip not handled correctly"
+        print_success("Optional question skip handled correctly")
+        success_count += 1
         
         # Test 7.3: Very long answer
         long_answer = "A" * 1000  # 1000 character answer
         result = onboarding.process_answer(workflow.workflow_id, long_answer)
-        if result.get("success") or result.get("valid", True):  # Should accept long text
-            print_success("Long answer handled correctly")
-            success_count += 1
-        else:
-            print_error("Long answer not handled correctly")
+        # Assuming the current question after skipping 'projects' is 'tool_preferences' (index 3)
+        # which is a multi_choice. Long text might be invalid for choice questions.
+        # Let's check the current question to be sure.
+        current_q_index = workflow.data.get("current_question_index")
+        current_question = ONBOARDING_QUESTIONS[current_q_index]
+        
+        # If it's a text question, it should be fine. If choice, it might fail validation.
+        # For this test, we'll assume it should pass if it's a text question, or be handled by validation if not.
+        # The original test implies it should be accepted.
+        assert result.get("success") or (result.get("retry_question") and current_question.question_type != "text"), "Long answer not handled as expected"
+        if result.get("success"):
+            print_success("Long answer handled correctly (accepted)")
+        elif result.get("retry_question"):
+             print_success(f"Long answer handled correctly (rejected by validation for {current_question.question_type})")
+        success_count += 1
         
         # Test 7.4: Special characters in answer
         special_answer = "Test@User#123!$%^&*()"
         result = onboarding.process_answer(workflow.workflow_id, special_answer)
-        if not result.get("error"):  # Should accept special characters in text
-            print_success("Special characters handled correctly")
-            success_count += 1
-        else:
-            print_error("Special characters not handled correctly")
+        # Similar to long answer, depends on the current question type.
+        current_q_index_after_long = workflow.data.get("current_question_index")
+        current_question_after_long = ONBOARDING_QUESTIONS[current_q_index_after_long]
+
+        assert not result.get("error") or (result.get("retry_question") and current_question_after_long.question_type != "text"), "Special characters not handled as expected"
+        if not result.get("error") and not result.get("retry_question"):
+             print_success("Special characters handled correctly (accepted)")
+        elif result.get("retry_question"):
+             print_success(f"Special characters handled correctly (rejected by validation for {current_question_after_long.question_type})")
+        success_count += 1
         
         print_info(f"Edge case tests passed: {success_count}/{total_tests}")
-        return success_count >= total_tests - 1  # Allow 1 failure
+        assert success_count >= total_tests -1, f"Expected at least {total_tests -1} edge case successes, got {success_count}" # Allow 1 failure
         
     except Exception as e:
         print_error(f"Error in edge case test: {e}")
-        return False
+        raise
 
 def run_all_tests():
     """Run all onboarding tests and report results."""

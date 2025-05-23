@@ -6,8 +6,9 @@ import sys
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
+import time # For duration calculation
 
-from config import Config
+from config import Config, get_config # Import get_config
 from ._tool_decorator import (
     get_registered_tools,
     get_tool_definitions,
@@ -15,6 +16,10 @@ from ._tool_decorator import (
 
 from user_auth.permissions import Permission
 from state_models import AppState
+
+# Import logging utilities
+from utils.logging_config import get_logger, start_tool_call, clear_tool_call_id # Use get_logger
+from utils.log_sanitizer import sanitize_data
 
 # === CRITICAL: IMPORT ALL TOOL MODULES TO TRIGGER DECORATOR REGISTRATION ===
 # This is the missing piece! The @tool_function decorators need to execute
@@ -30,7 +35,7 @@ except ImportError as e:
     log_import_success = False
     import_error = e
 
-log = logging.getLogger("tools.executor")
+log = get_logger("tools.executor") # Use get_logger
 
 # Log the import results immediately
 if log_import_success:
@@ -287,82 +292,153 @@ class ToolExecutor:
         Returns:
             The result of the tool execution
         """
-        # Check if the tool exists and is configured
-        if tool_name not in self.configured_tools:
-            log.error(f"Cannot execute unconfigured tool '{tool_name}'")
-            if tool_name in get_registered_tools():
-                return {
-                    "status": "ERROR",
-                    "error_type": "ToolNotConfigured",
-                    "message": f"Tool '{tool_name}' exists but is not configured."
-                }
-            return {
-                "status": "ERROR",
-                "error_type": "ToolNotFound",
-                "message": f"Tool '{tool_name}' does not exist."
-            }
-
-        # Get the tool function and its instance (if it's a class method)
-        tool_function = self.configured_tools[tool_name]
-        instance_key = self.tool_name_to_instance_key.get(tool_name)
+        current_config = get_config() # Get current config instance
+        tool_call_id = start_tool_call() # Start tool call context
+        start_time = time.monotonic()
         
-        # If it's a class method, ensure we have the instance
-        instance = None
-        if instance_key:
-            instance = self.tool_instances.get(instance_key)
-            if not instance:
-                log.error(f"No instance found for tool '{tool_name}' (class: {instance_key})")
-                return {
+        log_extra_base = {"tool_name": tool_name}
+
+        try:
+            # Check if the tool exists and is configured
+            if tool_name not in self.configured_tools:
+                log.error(f"Cannot execute unconfigured tool '{tool_name}'", extra=log_extra_base)
+                error_payload = {
                     "status": "ERROR",
-                    "error_type": "InstanceNotFound",
-                    "message": f"Internal error: Could not find instance for tool '{tool_name}'."
+                    "error_type": "ToolNotConfigured" if tool_name in get_registered_tools() else "ToolNotFound",
+                    "message": f"Tool '{tool_name}' is not configured or does not exist."
                 }
+                log.info(
+                    f"Tool Execution Summary: {tool_name} - FAILED (Not Configured/Found)",
+                    extra={
+                        **log_extra_base,
+                        "event_type": "tool_execution_summary",
+                        "status": "FAILED",
+                        "duration_ms": (time.monotonic() - start_time) * 1000,
+                        "error": error_payload
+                    }
+                )
+                return error_payload
+
+            # Get the tool function and its instance (if it's a class method)
+            tool_function = self.configured_tools[tool_name]
+            instance_key = self.tool_name_to_instance_key.get(tool_name)
             
-        # Handle input whether it's a dict or string
-        kwargs = {}
-        try:
-            if isinstance(tool_input, dict):
-                kwargs = tool_input
-            elif isinstance(tool_input, str) and tool_input.strip():
-                kwargs = json.loads(tool_input)
-                if not isinstance(kwargs, dict):
-                    raise TypeError("Tool input must be a JSON object")
-            elif tool_input is None or (isinstance(tool_input, str) and not tool_input.strip()):
-                # Empty input is fine, just use empty kwargs
-                pass
-            else:
-                raise TypeError(f"Invalid input type: {type(tool_input).__name__}")
+            instance = None
+            if instance_key:
+                instance = self.tool_instances.get(instance_key)
+                if not instance:
+                    log.error(f"No instance found for tool '{tool_name}' (class: {instance_key})", extra=log_extra_base)
+                    error_payload = {
+                        "status": "ERROR",
+                        "error_type": "InstanceNotFound",
+                        "message": f"Internal error: Could not find instance for tool '{tool_name}'."
+                    }
+                    log.info(
+                        f"Tool Execution Summary: {tool_name} - FAILED (Instance Not Found)",
+                        extra={
+                            **log_extra_base,
+                            "event_type": "tool_execution_summary",
+                            "status": "FAILED",
+                            "duration_ms": (time.monotonic() - start_time) * 1000,
+                            "error": error_payload
+                        }
+                    )
+                    return error_payload
                 
-            log.debug(f"Executing {tool_name} with args: {kwargs}")
-        except (json.JSONDecodeError, TypeError) as e:
-            log.error(f"Invalid input for '{tool_name}': {e}")
-            return {
-                "status": "ERROR",
-                "error_type": "InvalidInput",
-                "message": f"Invalid input format: {str(e)}"
-            }
+            kwargs = {}
+            try:
+                if isinstance(tool_input, dict):
+                    kwargs = tool_input
+                elif isinstance(tool_input, str) and tool_input.strip():
+                    kwargs = json.loads(tool_input)
+                    if not isinstance(kwargs, dict):
+                        raise TypeError("Tool input must be a JSON object")
+                elif tool_input is None or (isinstance(tool_input, str) and not tool_input.strip()):
+                    pass # Empty input is fine
+                else:
+                    raise TypeError(f"Invalid input type: {type(tool_input).__name__}")
+            except (json.JSONDecodeError, TypeError) as e:
+                log.error(f"Invalid input for '{tool_name}': {e}", extra=log_extra_base)
+                error_payload = {
+                    "status": "ERROR",
+                    "error_type": "InvalidInput",
+                    "message": f"Invalid input format: {str(e)}"
+                }
+                log.info(
+                    f"Tool Execution Summary: {tool_name} - FAILED (Invalid Input)",
+                    extra={
+                        **log_extra_base,
+                        "event_type": "tool_execution_summary",
+                        "status": "FAILED",
+                        "duration_ms": (time.monotonic() - start_time) * 1000,
+                        "error": error_payload
+                    }
+                )
+                return error_payload
 
-        # Debug logging before executing
-        log.debug(f"EXECUTOR PRE-CALL CHECK for '{tool_name}':")
-        log.debug(f"  > self.config object: {self.config}")
-        log.debug(f"  > type(self.config): {type(self.config)}")
-        log.debug(f"  > instance object: {instance}")
-        log.debug(f"  > type(instance): {type(instance)}")
-        log.debug(f"  > **kwargs being passed: {kwargs}")
-        log.debug(f"  > Calling: wrapper(instance=<{type(instance).__name__ if instance else 'None'}>, tool_config=<{type(self.config).__name__}>, **{kwargs})")
+            # Log Tool Call Parameters if log_tool_io is True
+            if current_config.settings.log_tool_io:
+                sanitized_params = sanitize_data(kwargs.copy()) # Sanitize a copy
+                log.info(
+                    "Tool Call Parameters",
+                    extra={
+                        **log_extra_base,
+                        "event_type": "tool_parameters", 
+                        "data": {"parameters": sanitized_params}
+                    }
+                )
+            else:
+                 log.debug(f"Executing {tool_name} with args: {kwargs}", extra=log_extra_base) # Keep original debug log if not verbose
 
-        # Execute the tool
-        try:
-            log.info(f"Starting execution of {tool_name}...")
+            # Execute the tool
             # CRITICAL: Always pass tool_config=self.config and app_state to the tool_function wrapper
-            # This ensures the tool has access to the configuration and current state
             result = await tool_function(instance, tool_config=self.config, app_state=app_state, **kwargs)
-            log.info(f"Success: {tool_name} execution completed")
+            
+            duration_ms = (time.monotonic() - start_time) * 1000
+
+            # Log Tool Call Raw Result if log_tool_io is True
+            if current_config.settings.log_tool_io:
+                sanitized_result = sanitize_data(result) # Sanitize result (might be complex type)
+                log.info(
+                    "Tool Call Raw Result",
+                    extra={
+                        **log_extra_base,
+                        "event_type": "tool_raw_result",
+                        "data": {"result": sanitized_result}
+                    }
+                )
+            
+            # Log Tool Execution Summary (always)
+            log.info(
+                f"Tool Execution Summary: {tool_name} - SUCCESS",
+                extra={
+                    **log_extra_base,
+                    "event_type": "tool_execution_summary",
+                    "status": "SUCCESS",
+                    "duration_ms": duration_ms
+                }
+            )
             return result
+            
         except Exception as e:
-            log.error(f"Error executing {tool_name}: {e}", exc_info=True)
-            return {
+            duration_ms = (time.monotonic() - start_time) * 1000
+            log.error(f"Error executing {tool_name}: {e}", exc_info=True, extra=log_extra_base)
+            error_payload = {
                 "status": "ERROR",
                 "error_type": "ExecutionError",
                 "message": f"Tool execution failed: {str(e)}"
             }
+            # Log Tool Execution Summary for failure
+            log.info(
+                f"Tool Execution Summary: {tool_name} - FAILED (Execution Error)",
+                extra={
+                    **log_extra_base,
+                    "event_type": "tool_execution_summary",
+                    "status": "FAILED",
+                    "duration_ms": duration_ms,
+                    "error": sanitize_data(error_payload) # Sanitize error payload too
+                }
+            )
+            return error_payload
+        finally:
+            clear_tool_call_id() # Clear tool call ID in all cases

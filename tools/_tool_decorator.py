@@ -1,5 +1,6 @@
 # --- FILE: tools/_tool_decorator.py ---
 import time
+import asyncio
 import functools
 import inspect
 import logging
@@ -1219,11 +1220,9 @@ def tool_function(
 
                             return {
                                 "status": "ERROR",
-                                "message": f"Tool result not JSON "
-                                           f"serializable: "
-                                           f"{type(result).__name__}",
-                                "detail": f"Serialization error: {json_e}. "
-                                          f"Result preview: {result_preview}"
+                                "error_type": "SerializationError",
+                                "user_facing_message": "I ran into an issue while trying to process your request. Please try again later.",
+                                "technical_details": f"Serialization error: {json_e}. Result preview: {result_preview}"
                             }
 
                     except (RequestsTimeout, RequestsConnectionError) as e:
@@ -1240,7 +1239,7 @@ def tool_function(
                                 exc_info=False
                             )
                             last_exception = e
-                            time.sleep(backoff_time)
+                            await asyncio.sleep(backoff_time)
                             continue
                         else:
                             # Final retry attempt failed - log and return error
@@ -1252,8 +1251,8 @@ def tool_function(
                             return {
                                 "status": "ERROR",
                                 "error_type": "NetworkError",
-                                "message": f"Network error: {e}",
-                                "detail": "Max retries exceeded"
+                                "user_facing_message": "I'm having trouble connecting to the required service. Please try again in a few moments.",
+                                "technical_details": f"Network error after {max_retries + 1} attempts: {e.__class__.__name__}: {str(e)}"
                             }
 
                     except RecursionError as e:
@@ -1267,11 +1266,8 @@ def tool_function(
                         return {
                             "status": "ERROR",
                             "error_type": "RecursionError",
-                            "message": f"Recursion error: {e}",
-                            "detail": (
-                                "Function may contain infinite recursion "
-                                "or overly complex recursive structures"
-                            )
+                            "user_facing_message": "I encountered an internal problem (recursion error) while processing your request. The development team has been notified.",
+                            "technical_details": f"Recursion error: {e.__class__.__name__}: {str(e)}. Function may contain infinite recursion or overly complex recursive structures"
                         }
 
                     except Exception as e:
@@ -1286,8 +1282,8 @@ def tool_function(
                         return {
                             "status": "ERROR",
                             "error_type": e.__class__.__name__,
-                            "message": f"Tool execution failed: {e}",
-                            "detail": str(e)
+                            "user_facing_message": "I ran into an unexpected issue while trying to complete that. Please try again in a moment.",
+                            "technical_details": f"Unexpected error: {e.__class__.__name__}: {str(e)}"
                         }
 
                 # (Safeguard return)
@@ -1299,9 +1295,9 @@ def tool_function(
                 return {
                     "status": "ERROR",
                     "error_type": "UnknownExecutionError",
-                    "message": "Tool failed unexpectedly after retries.",
-                    "detail": (f"Last error: {last_exception}"
-                                if last_exception else "None")
+                    "user_facing_message": "I failed to complete your request after a few tries. Please try again later.",
+                    "technical_details": (f"Tool failed unexpectedly after retries. Last error: {last_exception}"
+                                if last_exception else "Tool failed unexpectedly after retries. No specific last exception recorded.")
                 }
 
             # Execute the tool with retry logic
@@ -1328,9 +1324,8 @@ def tool_function(
                 return {
                     "status": "ERROR",
                     "error_type": "WrapperError",
-                    "message": f"Critical error in tool wrapper: {e}",
-                    "detail": "This is a bug in the tool wrapper, not the "
-                              "tool itself. Please report this error."
+                    "user_facing_message": "A critical internal error occurred. The development team has been alerted.",
+                    "technical_details": f"Critical error in tool wrapper: {e.__class__.__name__}: {str(e)}. This is a bug in the tool wrapper, not the tool itself."
                 }
 
         # --- Store Class Info on Wrapper ---

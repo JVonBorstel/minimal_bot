@@ -5,6 +5,7 @@ This tests the exact scenario the user described: multi-service coordination for
 """
 
 import asyncio
+import pytest # Add pytest
 import time
 from config import get_config
 from user_auth.models import UserProfile
@@ -12,6 +13,7 @@ from tools.tool_executor import ToolExecutor
 from core_logic.tool_selector import ToolSelector
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_realistic_scenario():
     print("🎯 REALISTIC SCENARIO TEST")
     print("Scenario: 'Use whatever tools you need but I need to compare my repo against my Jira ticket'")

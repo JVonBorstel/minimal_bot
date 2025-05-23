@@ -6,7 +6,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
-from state_models import AppState
+from state_models import AppState, Message, TextPart # Added Message, TextPart
 from utils.utils import sanitize_message_content
 
 def test_sanitize_message_content_returns_int():
@@ -14,8 +14,8 @@ def test_sanitize_message_content_returns_int():
     # Create a mock AppState with some messages
     app_state = AppState()
     app_state.messages = [
-        {"role": "user", "content": "test message"},
-        {"role": "assistant", "content": "response"}
+        Message(role="user", parts=[TextPart(text="test message")]),
+        Message(role="model", parts=[TextPart(text="response")])
     ]
     
     # Call the function
@@ -29,8 +29,8 @@ def test_sanitize_message_content_with_long_content():
     """Test that sanitize_message_content handles long content and returns correct count."""
     app_state = AppState()
     app_state.messages = [
-        {"role": "user", "content": "x" * 200000},  # Very long content
-        {"role": "assistant", "content": "short response"}
+        Message(role="user", parts=[TextPart(text="x" * 200000)]),  # Very long content
+        Message(role="model", parts=[TextPart(text="short response")])
     ]
     
     result = sanitize_message_content(app_state)
@@ -43,8 +43,8 @@ def test_sanitize_message_content_with_no_sanitization_needed():
     """Test that sanitize_message_content returns 0 when no sanitization is needed."""
     app_state = AppState()
     app_state.messages = [
-        {"role": "user", "content": "short message"},
-        {"role": "assistant", "content": "short response"}
+        Message(role="user", parts=[TextPart(text="short message")]),
+        Message(role="model", parts=[TextPart(text="short response")])
     ]
     
     result = sanitize_message_content(app_state)

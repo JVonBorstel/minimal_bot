@@ -404,6 +404,24 @@ def clear_user_profile_cache() -> None:
         cache_size = _user_profile_cache.clear()
         logger.info(f"User profile cache cleared. {cache_size} entries removed.")
 
+def invalidate_user_profile_cache(user_id: str) -> bool:
+    """
+    Invalidates the cache for a specific user. 
+    This should be called when a user's profile data is updated externally 
+    to ensure fresh data is loaded from the database on the next access.
+    
+    Args:
+        user_id: The user ID whose cache entry should be invalidated
+        
+    Returns:
+        True if an entry was removed, False if no entry existed
+    """
+    with _cache_lock:
+        removed = _user_profile_cache.remove(user_id)
+        if removed:
+            logger.debug(f"Invalidated cache for user {user_id}")
+        return removed
+
 def get_cache_entry_details(user_id: str) -> Optional[Dict]:
     """
     Gets detailed information about a specific cache entry for diagnostics.

@@ -2,10 +2,12 @@
 """Test the actual Jira tool to see what it returns."""
 
 import asyncio
+import pytest # Add pytest
 from tools.tool_executor import ToolExecutor
 from config import get_config
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_real_jira():
     print("🔍 TESTING ACTUAL JIRA TOOL OUTPUT")
     print("=" * 50)

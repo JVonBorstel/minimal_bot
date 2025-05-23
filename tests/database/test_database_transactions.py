@@ -16,6 +16,7 @@ import time
 import threading
 from typing import Dict, Any, Optional, List
 from concurrent.futures import ThreadPoolExecutor
+import pytest # Add pytest
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +80,7 @@ class TransactionTester:
             logger.error("Storage initialization failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_atomic_write_operations(self):
         """Test that write operations are atomic."""
         print("⚛️ TESTING ATOMIC WRITE OPERATIONS")
@@ -176,6 +178,7 @@ class TransactionTester:
             logger.error("Atomic write operations test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_concurrent_user_operations(self):
         """Test concurrent operations from different users."""
         print("👥 TESTING CONCURRENT USER OPERATIONS")
@@ -300,6 +303,7 @@ class TransactionTester:
             logger.error("Concurrent user operations test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_transaction_rollback_safety(self):
         """Test transaction rollback behavior."""
         print("🔄 TESTING TRANSACTION ROLLBACK SAFETY")
@@ -425,6 +429,7 @@ class TransactionTester:
             logger.error("Transaction rollback safety test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_data_consistency_under_load(self):
         """Test data consistency under concurrent load."""
         print("⚡ TESTING DATA CONSISTENCY UNDER LOAD")
@@ -560,6 +565,7 @@ class TransactionTester:
             logger.error("Data consistency under load test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_deadlock_prevention(self):
         """Test that the system prevents deadlocks."""
         print("🔒 TESTING DEADLOCK PREVENTION")

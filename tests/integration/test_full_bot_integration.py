@@ -5,6 +5,7 @@ This tests that the intelligent tool selection is actually working in the main b
 """
 
 import asyncio
+import pytest # Add pytest
 import time
 from botbuilder.core import TurnContext, MessageFactory
 from botbuilder.schema import Activity, ActivityTypes, ChannelAccount
@@ -31,6 +32,7 @@ class MockTurnContext:
         print(f"🤖 Bot Response: {activity.text}")
         return type('MockResponse', (), {'id': f"response_{len(self.sent_activities)}"})()
 
+@pytest.mark.asyncio
 async def test_full_bot_integration():
     print("🎯 FULL BOT INTEGRATION TEST")
     print("Testing end-to-end workflow with real bot instance and intelligent tool selection")

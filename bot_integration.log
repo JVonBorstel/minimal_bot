@@ -1,0 +1,190 @@
+2025-05-23 13:10:57,356 - bot_core.message_handler - WARNING - Possible character splitting detected in text: 's u p   b i t c h   d o   y o u   a c t u a l...'
+2025-05-23 13:11:21,692 - bot_core.message_handler - WARNING - Possible character splitting detected in text: 's u p   b i t c h   d o   y o u   a c t u a l...'
+2025-05-23 13:11:22,305 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:11:22,305 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:11:22,305 - bot_core.enhanced_bot_handler - ERROR - Failed to process user input: 'Message' object has no attribute 'metadata'
+2025-05-23 13:11:22,307 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:11:22,308 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:11:22,309 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:11:22,309 - bot_core.enhanced_bot_handler - WARNING - Pattern 1 - Long text without spaces: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0...'
+2025-05-23 13:11:22,309 - bot_core.enhanced_bot_handler - ERROR - Character splitting detected in input: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0SwGvnMV3DAxJTd3DrJkt...'
+2025-05-23 13:11:22,310 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:11:22,310 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:11:22,311 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:11:22,311 - bot_core.enhanced_bot_handler - ERROR - Failed to process user input: 'Message' object has no attribute 'metadata'
+2025-05-23 13:11:22,311 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:11:22,317 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:11:22,318 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:11:22,318 - bot_core.enhanced_bot_handler - ERROR - Failed to process user input: 'Message' object has no attribute 'metadata'
+2025-05-23 13:11:22,319 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:12:01,526 - bot_core.message_handler - WARNING - Possible character splitting detected in text: 's u p   b i t c h   d o   y o u   a c t u a l...'
+2025-05-23 13:12:02,100 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:12:02,100 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:12:02,101 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,106 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:12:02,106 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:12:02,107 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:12:02,108 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:12:02,108 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:12:02,108 - bot_core.enhanced_bot_handler - WARNING - Pattern 1 - Long text without spaces: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0...'
+2025-05-23 13:12:02,109 - bot_core.enhanced_bot_handler - ERROR - Character splitting detected in input: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0SwGvnMV3DAxJTd3DrJkt...'
+2025-05-23 13:12:02,109 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:12:02,110 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:12:02,111 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:12:02,111 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:12:02,112 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,114 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'Hello world'
+2025-05-23 13:12:02,115 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:12:02,119 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,120 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,122 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,125 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:12:02,126 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:12:02,127 - utils - DEBUG - No message cleanup needed, under the limit.
+2025-05-23 13:12:02,132 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:12:02,134 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:12:02,135 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:12:02,136 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:12:02,137 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:11,524 - bot_core.message_handler - WARNING - Possible character splitting detected in text: 's u p   b i t c h   d o   y o u   a c t u a l...'
+2025-05-23 13:15:12,039 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:12,039 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:12,039 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,041 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:15:12,042 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:12,043 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:12,043 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:12,043 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:12,044 - bot_core.enhanced_bot_handler - WARNING - Pattern 1 - Long text without spaces: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0...'
+2025-05-23 13:15:12,044 - bot_core.enhanced_bot_handler - ERROR - Character splitting detected in input: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0SwGvnMV3DAxJTd3DrJkt...'
+2025-05-23 13:15:12,045 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:12,045 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:12,046 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:12,046 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:12,047 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,049 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'Hello world'
+2025-05-23 13:15:12,051 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:12,054 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,055 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,057 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,059 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:12,059 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:12,060 - utils - DEBUG - No message cleanup needed, under the limit.
+2025-05-23 13:15:12,061 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:12,062 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:12,062 - state - ERROR - Unexpected error adding message: 'Message' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\jvonborstel\Desktop\Dev Work\Projects\minimal_bot\state_models.py", line 654, in add_message
+    f"Added message ({message_obj.id}) - Role: {role}, Parts: {len(message_obj.parts)}, "
+                      ^^^^^^^^^^^^^^
+  File "C:\Users\jvonborstel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\pydantic\main.py", line 892, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Message' object has no attribute 'id'
+2025-05-23 13:15:12,063 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:15:12,063 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:31,030 - bot_core.message_handler - WARNING - Possible character splitting detected in text: 's u p   b i t c h   d o   y o u   a c t u a l...'
+2025-05-23 13:15:31,530 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:31,530 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:31,531 - state - DEBUG - Added message - Role: user, Parts: 3, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,531 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:15:31,531 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:31,532 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:31,532 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:31,532 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:31,533 - bot_core.enhanced_bot_handler - WARNING - Pattern 1 - Long text without spaces: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0...'
+2025-05-23 13:15:31,533 - bot_core.enhanced_bot_handler - ERROR - Character splitting detected in input: '2rqy1KLL5D2MMNVDf9WdKXxZLKxOr0SwGvnMV3DAxJTd3DrJkt...'
+2025-05-23 13:15:31,534 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:31,535 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:31,535 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:31,535 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:31,536 - state - DEBUG - Added message - Role: user, Parts: 3, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,536 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'Hello world'
+2025-05-23 13:15:31,536 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input
+2025-05-23 13:15:31,539 - state - DEBUG - Added message - Role: user, Parts: 5, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,539 - state - DEBUG - Added message - Role: assistant, Parts: 9, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,540 - state - DEBUG - Added message - Role: user, Parts: 63, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,540 - utils - DEBUG - Validating message integrity...
+2025-05-23 13:15:31,540 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:31,541 - utils - DEBUG - No message cleanup needed, under the limit.
+2025-05-23 13:15:31,542 - bot_core.enhanced_bot_handler - DEBUG - Starting safe operation: process_user_input
+2025-05-23 13:15:31,543 - utils - DEBUG - State validation complete. Valid: True, Repairs: 0
+2025-05-23 13:15:31,543 - state - DEBUG - Added message - Role: user, Parts: 3, Internal: N/A, Type: N/A
+2025-05-23 13:15:31,543 - bot_core.enhanced_bot_handler - INFO - Successfully processed user input: 'sup bitch do you actually work now ?'
+2025-05-23 13:15:31,544 - bot_core.enhanced_bot_handler - DEBUG - Completed safe operation: process_user_input

@@ -3,7 +3,7 @@ import json
 # import logging # Replaced by custom logging
 import re
 import datetime
-from typing import List, Dict, Any, Optional, Tuple, TypeAlias
+from typing import List, Dict, Any, Optional, Tuple, TypeAlias, Union
 import sys
 import os
 from importlib import import_module
@@ -117,10 +117,17 @@ from .constants import (
     WORKFLOW_STAGE_MESSAGE_TYPE,
     THOUGHT_MESSAGE_TYPE,
     REFLECTION_MESSAGE_TYPE,
-    PLAN_MESSAGE_TYPE
-    # MAX_HISTORY_MESSAGES,  # This constant is used in _prepare_history_for_llm
-    # HISTORY_WINDOW_SIZE  # This constant is used in the template
+    PLAN_MESSAGE_TYPE,
+    # MAX_HISTORY_MESSAGES is defined in config.py, not constants.py
 )
+
+# Import AppState and Message models from state_models
+# Simple direct import from parent directory
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from state_models import AppState, Message
+
+# Type alias for LLM SDK content type
+RuntimeContentType = Union[Dict[str, Any], glm.Content] # glm.Content or dicts
 
 # --- Custom Exceptions ---
 class HistoryResetRequiredError(Exception):
@@ -315,6 +322,101 @@ def _optimize_message_history(
         }
     )
     return optimized_messages
+
+
+def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_history_items: Optional[int] = None) -> Tuple[List[RuntimeContentType], List[str]]:
+    """
+    Prepares messages from AppState for LLM consumption using the new Message structure.
+    
+    Args:
+        app_state: The AppState containing messages to prepare
+        config_max_history_items: Optional maximum number of history items to include
+        
+    Returns:
+        Tuple of (formatted messages for LLM, list of preparation notes/errors)
+    """
+    preparation_notes = []
+    formatted_messages: List[RuntimeContentType] = []
+    
+    # Use provided max_history_items or default to 30
+    max_items = config_max_history_items if config_max_history_items is not None else 30
+    
+    # Use AppState's internal messages directly. If optimization is needed *before* this conversion,
+    # it should be a separate step that modifies app_state.messages or produces a temporary list.
+    # For now, this function will take the last `max_items` from app_state.messages.
+    history_to_convert = app_state.messages[-max_items:]
+
+    if len(app_state.messages) > max_items:
+        note = f"History truncated to last {max_items} messages from original {len(app_state.messages)}."
+        log.debug(note, extra={"event_type": "history_truncation", "details": {"original_count": len(app_state.messages), "truncated_count": len(history_to_convert)}})
+        preparation_notes.append(note)
+
+    for msg_from_history in history_to_convert:
+        # msg_from_history is AppState.Message Pydantic model
+        sdk_parts = []
+        for part_data in msg_from_history.parts: # msg_from_history.parts is List[MessagePart]
+            if part_data.type == "text":
+                # part_data is TextPart
+                sdk_parts.append(glm.Part(text=part_data.text))
+            elif part_data.type == "function_call":
+                # part_data is FunctionCallPart
+                # part_data.function_call is FunctionCallData(name=..., args=...)
+                sdk_parts.append(glm.Part(function_call=glm.FunctionCall(
+                    name=part_data.function_call.name,
+                    args=part_data.function_call.args # args is already a dict
+                )))
+            elif part_data.type == "function_response":
+                # part_data is FunctionResponsePart
+                # part_data.function_response is FunctionResponseData(name=..., response=FunctionResponseDataContent(content=...))
+                sdk_parts.append(glm.Part(function_response=glm.FunctionResponse(
+                    name=part_data.function_response.name,
+                    response={'content': part_data.function_response.response.content} # Ensure structure is {'content': ...}
+                )))
+            # Add other part types if you use them (inline_data, file_data etc.)
+            # else:
+            #     note = f"Unsupported part type '{part_data.type}' in message {msg_from_history.id}. Skipping part."
+            #     log.warning(note, extra={"event_type": "unsupported_message_part_type", "details": {"message_id": msg_from_history.id, "part_type": part_data.type}})
+            #     preparation_notes.append(note)
+        
+        if sdk_parts:
+            # Role is already validated by AppState.Message model to be one of "user", "model", "function", "system"
+            role_for_sdk = msg_from_history.role
+            if role_for_sdk == "system": # Map system to model for some LLMs if system role isn't directly supported for history
+                # This depends on the specific LLM and how system prompts are handled.
+                # If llm_interface.py uses a dedicated system_instruction param, system messages in history might be ignored or cause errors.
+                # For Gemini, 'system' is not a valid role in history. Map to 'model' or filter out.
+                # Let's assume for now we map system messages with text to 'model' for context.
+                # If the system message was only for internal logging, it might have is_internal=True
+                if msg_from_history.is_internal:
+                    note = f"Skipping internal system message {msg_from_history.id} for LLM history."
+                    log.debug(note, extra={"event_type": "skip_internal_system_message", "details": {"message_id": msg_from_history.id}})
+                    preparation_notes.append(note)
+                    continue # Skip this system message
+                role_for_sdk = "model" # Or filter out: continue
+                note = f"Mapping system message {msg_from_history.id} to role 'model' for LLM history."
+                log.debug(note, extra={"event_type": "map_system_to_model", "details": {"message_id": msg_from_history.id}})
+                preparation_notes.append(note)
+
+            formatted_messages.append(glm.Content(parts=sdk_parts, role=role_for_sdk))
+        else:
+            note = f"Message {msg_from_history.id} (role '{msg_from_history.role}') had no convertible parts. Skipping message."
+            log.warning(note, extra={"event_type": "message_no_convertible_parts", "details": {"message_id": msg_from_history.id, "role": msg_from_history.role}})
+            preparation_notes.append(note)
+            
+    # Basic sequence validation/repair (simplified from guide for now)
+    # The Gemini SDK is more flexible, but some models might still prefer strict alternation.
+    # For now, rely on the AppState.Message validation for roles and parts.
+    # Advanced repair (like in the old _prepare_history_for_llm) can be added if needed.
+    if not formatted_messages and app_state.messages:
+        note = "Formatted history is empty, but original messages existed. This might indicate all messages were filtered or had issues."
+        log.warning(note, extra={"event_type": "empty_formatted_history_with_originals"})
+        preparation_notes.append(note)
+
+    log.debug(
+        "Prepared messages for LLM from AppState.",
+        extra={"event_type": "prepare_messages_from_appstate_completed", "details": {"formatted_message_count": len(formatted_messages), "original_truncated_count": len(history_to_convert), "preparation_notes_count": len(preparation_notes)}}
+    )
+    return formatted_messages, preparation_notes
 
 
 def _prepare_history_for_llm(

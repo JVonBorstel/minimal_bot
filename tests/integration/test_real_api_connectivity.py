@@ -5,12 +5,14 @@ This tests the user's scenario with REAL API calls, not just tool selection
 """
 
 import asyncio
+import pytest # Add pytest
 import time
 from config import get_config
 from user_auth.models import UserProfile
 from tools.tool_executor import ToolExecutor
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_real_api_connectivity():
     print("🌐 REAL API CONNECTIVITY TEST")
     print("Testing actual API calls for: 'Compare my repo against my Jira ticket'")

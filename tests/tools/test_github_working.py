@@ -6,6 +6,9 @@ import logging
 import json
 from dotenv import load_dotenv, find_dotenv
 
+import pytest # Add pytest import
+import pytest_asyncio # Add this import
+
 # Load .env file first
 print("🔧 Loading environment configuration...")
 dotenv_path = find_dotenv(usecwd=True)
@@ -26,6 +29,46 @@ from tools.github_tools import GitHubTools
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
+@pytest.fixture(scope="module")
+def config():
+    """Provides the application configuration."""
+    print("🔧 (Fixture) Loading configuration...")
+    cfg = get_config()
+    print("✅ (Fixture) Configuration loaded")
+    return cfg
+
+@pytest.fixture(scope="module")
+def app_state(config) -> AppState: # Add config dependency
+    """Provides a test AppState instance."""
+    print("🔧 (Fixture) Creating test AppState...")
+    # Create UserProfile with all required fields
+    test_user = UserProfile(
+        user_id="test_user_github_fixture_working", # Changed user_id for clarity
+        display_name="GitHub Test User (Fixture Working)",
+        email="test_fixture_working@example.com",
+        assigned_role="ADMIN"  # Give admin permissions for testing
+    )
+    # Create AppState and set current user
+    _app_state = AppState(current_user=test_user)
+    
+    print(f"✅ (Fixture) Created AppState with user: {test_user.display_name} ({test_user.user_id})")
+    return _app_state
+
+@pytest_asyncio.fixture(scope="function") # Changed to pytest_asyncio.fixture
+async def github_tools(config, app_state): # Made async, added config and app_state
+    """Provides an initialized GitHubTools instance."""
+    print("🔧 (Fixture) Initializing GitHub tools...")
+    _tools = GitHubTools(config=config, app_state=app_state, testing_mode=False)
+    
+    if not _tools.github_clients:
+        pytest.skip("GITHUB NOT CONFIGURED. Skipping GitHub working tests.")
+        
+    print(f"✅ (Fixture) GitHub tools initialized with {len(_tools.github_clients)} account(s)")
+    print(f"   (Fixture) Active account: {_tools.active_account_name}")
+    print(f"   (Fixture) Authenticated as: {_tools.authenticated_user_login}")
+    return _tools
+
+# This local helper function is fine, or its logic can be moved into the app_state fixture
 def create_test_app_state() -> AppState:
     """Create a minimal AppState with proper UserProfile for testing."""
     print("🔧 Creating test AppState...")
@@ -45,6 +88,7 @@ def create_test_app_state() -> AppState:
     print(f"✅ Created AppState with user: {test_user.display_name} ({test_user.user_id})")
     return app_state
 
+@pytest.mark.asyncio
 async def test_github_list_repositories(github_tools: GitHubTools, app_state: AppState):
     """Test the github_list_repositories tool."""
     print("\n📋 TESTING: github_list_repositories")
@@ -96,6 +140,7 @@ async def test_github_list_repositories(github_tools: GitHubTools, app_state: Ap
         log.exception("Full error details:")
         return False
 
+@pytest.mark.asyncio
 async def test_github_search_code(github_tools: GitHubTools, app_state: AppState):
     """Test the github_search_code tool."""
     print("\n🔍 TESTING: github_search_code")

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sys
 import os
+import pytest # Add pytest
 
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +22,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("test_help_basic")
 
+@pytest.mark.asyncio
 async def test_help_tool_execution():
     """Test actual help tool execution and validate response."""
     print("🔍 TESTING HELP TOOL EXECUTION")
@@ -106,6 +108,7 @@ async def test_help_tool_execution():
         log.error(f"Help tool test exception: {e}", exc_info=True)
         return False, None
 
+@pytest.mark.asyncio
 async def test_help_tool_performance():
     """Test help tool execution performance."""
     print("\n⏱️ TESTING HELP TOOL PERFORMANCE")

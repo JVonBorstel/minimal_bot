@@ -332,12 +332,6 @@ class PerplexityTools:
                 "No query provided for perplexity_web_search. Using default query 'top news stories today'.")
             query = "top news stories today"
 
-        if not self.api_key:
-            log.warning(
-                "Perplexity API key is not configured. web_search tool is not functional.")
-            return {"answer": "Perplexity API key is not configured.",
-                    "model": model_name or self.default_model, "sources": []}
-
         pplx_model = model_name or self.default_model
         # Ensure a valid model is used
         if pplx_model not in AVAILABLE_PERPLEXITY_MODELS_REF:
@@ -386,18 +380,12 @@ class PerplexityTools:
             payload["web_search_options"] = web_search_options
             log.debug(f"Using web_search_options: {web_search_options}")
 
-        try:
-            response_data = self._send_request(
-                "chat/completions", method="POST", data=payload)
-        except Exception as e:
-            log.error(
-                f"Perplexity web_search API request failed: {e}",
-                exc_info=True)
-            return {
-                "answer": f"[Could not retrieve answer due to API error: {e}]",
-                "model": pplx_model,
-                "sources": []}
+        # Let exceptions from _send_request propagate to the decorator
+        response_data = self._send_request(
+            "chat/completions", method="POST", data=payload)
 
+        # The try-except block below is for parsing issues, not API call failures.
+        # API call failures are now handled by the decorator via exceptions from _send_request.
         try:
             # Use helper methods to extract answer and sources
             answer = self._extract_answer(response_data)
@@ -407,11 +395,14 @@ class PerplexityTools:
                 f"Successfully retrieved answer from Perplexity model {pplx_model} with {len(sources)} sources.")
 
         except Exception as e:
+            # This catches errors during parsing of a successful API response.
+            # We'll wrap this in a RuntimeError to be caught by the decorator.
             log.warning(
                 f"Could not extract answer or sources from Perplexity response: {e}",
                 exc_info=True)
-            answer = f"[Could not parse Perplexity response: {e}]"
-            sources = []
+            # It's better to raise an error here so the decorator can standardize it.
+            # The LLM should know if parsing failed.
+            raise RuntimeError(f"Failed to parse the successful response from Perplexity: {e}") from e
 
         return {"answer": answer, "model": pplx_model, "sources": sources}
 
@@ -440,16 +431,18 @@ class PerplexityTools:
 
         if not topic:
             log.error("Perplexity summarize_topic failed: Topic cannot be empty.")
+            # This ValueError will be caught and standardized by the @tool decorator
             raise ValueError("Topic cannot be empty.")
 
-        if not self.api_key:
-            log.warning(
-                "Perplexity API key is not configured. summarize_topic tool is not functional.")
-            return {
-                "topic": topic,
-                "summary": "Perplexity API key is not configured.",
-                "model": model_name or self.default_model,
-                "sources": []}
+        # Removed manual API key check here - decorator will handle it
+        # if not self.api_key:
+        #     log.warning(
+        #         "Perplexity API key is not configured. summarize_topic tool is not functional.")
+        #     return {
+        #         "topic": topic,
+        #         "summary": "Perplexity API key is not configured.",
+        #         "model": model_name or self.default_model,
+        #         "sources": []}
 
         pplx_model = model_name or self.default_model
 
@@ -498,44 +491,40 @@ class PerplexityTools:
                     f"Invalid recency_filter '{recency_filter}'. Must be 'day', 'week', 'month', or 'year'. Parameter will be ignored.")
             else:
                 payload["search_recency_filter"] = recency_filter
-                log.debug(f"Using search_recency_filter: {recency_filter}")
 
-        # Add web_search_options with search_context_size - default to medium for summaries
-        web_search_options: Dict[str, Any] = {}
-        if search_context_size not in ["low", "medium", "high"]:
-            log.warning(
-                f"Invalid search_context_size '{search_context_size}'. Must be 'low', 'medium', or 'high'. Defaulting to 'medium'.")
-            search_context_size = "medium"
+        # Add web_search_options if any context parameters are provided
+        if search_context_size:
+            web_search_options: Dict[str, Any] = {}
+            if search_context_size not in ["low", "medium", "high"]:
+                log.warning(
+                    f"Invalid search_context_size '{search_context_size}'. Must be 'low', 'medium', or 'high'. Defaulting to 'low'.")
+                search_context_size = "low"
+            web_search_options["search_context_size"] = search_context_size
+            payload["web_search_options"] = web_search_options
+            log.debug(f"Using web_search_options: {web_search_options}")
 
-        web_search_options["search_context_size"] = search_context_size
-        payload["web_search_options"] = web_search_options
-        log.debug(f"Using search_context_size: {search_context_size}")
+        # Let exceptions from _send_request propagate to the decorator
+        response_data = self._send_request(
+            "chat/completions", method="POST", data=payload)
 
         try:
-            response_data = self._send_request(
-                "chat/completions", method="POST", data=payload)
-
-            # Use helper methods to extract answer and sources
-            summary = self._extract_answer(response_data)
+            answer = self._extract_answer(response_data)
             sources = self._extract_sources(response_data)
-
             log.info(
-                f"Successfully retrieved topic summary from Perplexity model {pplx_model}")
-            return {
-                "topic": topic,
-                "summary": summary,
-                "model": pplx_model,
-                "sources": sources}
-
+                f"Successfully retrieved summary from Perplexity model {pplx_model} with {len(sources)} sources.")
         except Exception as e:
-            log.error(
-                f"Perplexity summarize_topic API request failed: {e}",
+            log.warning(
+                f"Could not extract answer or sources from Perplexity summary response: {e}",
                 exc_info=True)
-            return {
-                "topic": topic,
-                "summary": f"[Could not retrieve summary due to API error: {e}]",
-                "model": pplx_model,
-                "sources": []}
+            # Raise RuntimeError for parsing errors to be standardized by the decorator
+            raise RuntimeError(f"Failed to parse the successful summary response from Perplexity: {e}") from e
+
+        return {
+            "topic": topic,
+            "summary": answer,
+            "model": pplx_model,
+            "sources": sources
+        }
 
     @tool(
         name="perplexity_structured_search",
@@ -604,172 +593,114 @@ class PerplexityTools:
         search_context_size: Optional[Literal["low", "medium", "high"]] = None
     ) -> Dict[str, Any]:
         """
-        Performs a web search and returns results in a structured format based on JSON schema or regex pattern.
+        Performs a web search and returns results in a structured format (JSON schema or regex pattern).
+        The main validation for schema/regex_pattern based on format_type is handled by Pydantic in the decorator.
         """
         if self.config.MOCK_MODE:
             log.warning("Perplexity structured_search running in mock mode.")
-            mock_result = '{"answer": "This is a mock response", "data": {"field1": "value1", "field2": 42}}'
             return {
                 "query": query,
-                "result": mock_result,
-                "structured_data": json.loads(mock_result) if format_type == "json_schema" else None,
-                "model": model_name or self.default_model}
+                "format_type": format_type,
+                "structured_data": {"mock_field": "Mock structured data for your query"},
+                "model": model_name or self.default_model,
+                "sources": []
+            }
 
-        if not query:
-            log.error(
-                "Perplexity structured_search failed: Query cannot be empty.")
-            raise ValueError("Query cannot be empty.")
+        # API key check is now handled by the @tool decorator's is_tool_configured
 
-        # Validate format parameters
+        # Parameter validation for schema/regex_pattern based on format_type
+        # is primarily handled by Pydantic schema in the decorator.
+        # However, a runtime check here can be a safeguard or for logic not expressible in JSON schema.
         if format_type == "json_schema" and not schema:
-            log.error(
-                "Perplexity structured_search failed: Schema is required when format_type is 'json_schema'.")
-            raise ValueError(
-                "Schema is required when format_type is 'json_schema'.")
-        elif format_type == "regex" and not regex_pattern:
-            log.error(
-                "Perplexity structured_search failed: Regex pattern is required when format_type is 'regex'.")
-            raise ValueError(
-                "Regex pattern is required when format_type is 'regex'.")
-
-        if not self.api_key:
-            log.warning(
-                "Perplexity API key is not configured. structured_search tool is not functional.")
-            return {
-                "query": query,
-                "result": "Perplexity API key is not configured.",
-                "structured_data": None,
-                "model": model_name or self.default_model}
+            raise ValueError("The 'schema' parameter is required when 'format_type' is 'json_schema'.")
+        if format_type == "regex" and not regex_pattern:
+            raise ValueError("The 'regex_pattern' parameter is required when 'format_type' is 'regex'.")
 
         pplx_model = model_name or self.default_model
-
-        # Validation against available models
         if pplx_model not in AVAILABLE_PERPLEXITY_MODELS_REF:
             log.warning(
                 f"Specified Perplexity model '{pplx_model}' is not in AVAILABLE_PERPLEXITY_MODELS_REF. Using 'sonar' instead.")
             pplx_model = "sonar"
 
-        # Validate temperature
-        if temperature is not None:
-            if temperature < 0.0 or temperature > 1.5:
-                log.warning(
-                    f"Invalid temperature {temperature}. Must be between 0.0 and 1.5. Using default 0.1 instead.")
-                temperature = 0.1
-
         log.info(
-            f"Performing Perplexity structured search with model: {pplx_model}. Query: '{query[:100]}...'")
-        log.debug(f"Format type: {format_type}, Temperature: {temperature}")
+            f"Performing Perplexity structured_search with model: {pplx_model}. Query: '{query[:100]}...', Format: {format_type}")
 
-        # Prepare the response format section based on the selected format type
-        response_format: Dict[str, Any] = {"type": format_type}
+        # System prompt instructing the model to provide structured output
         if format_type == "json_schema":
-            if schema is None:
-                raise ValueError(
-                    "JSON schema is required when format_type is 'json_schema'.")
-            response_format["json_schema"] = schema
+            system_prompt = f"You are an AI assistant that extracts structured data from web search results. Respond ONLY with a valid JSON object matching the following schema. Do not include any other text, explanations, or markdown. Schema:\n```json\n{json.dumps(schema)}\n```"
         elif format_type == "regex":
-            if regex_pattern is None:
-                raise ValueError(
-                    "Regex pattern is required when format_type is 'regex'.")
-            response_format["regex"] = {"regex": regex_pattern}
-            log.debug(f"Using regex pattern: {regex_pattern}")
+            system_prompt = f"You are an AI assistant that extracts specific information matching a regex pattern from web search results. Respond ONLY with the text that matches the pattern. Do not include any other text or explanations. Pattern: {regex_pattern}"
+        else:
+            # Should not happen due to Literal type hint and Pydantic validation
+            raise ValueError(f"Invalid format_type: {format_type}. Must be 'json_schema' or 'regex'.")
 
-        # Construct appropriate system prompt based on format type
-        system_prompt = "You are an AI assistant specialized in providing accurate, factual, and structured responses based on web search results."
+        payload: Dict[str, Any] = {
+            "model": pplx_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            "temperature": temperature
+        }
 
-        # Add format-specific instructions
         if format_type == "json_schema":
-            system_prompt += " Your response must conform exactly to the specified JSON schema. Conduct thorough research to gather accurate information for each field in the schema."
-        elif format_type == "regex":
-            system_prompt += " Your response must match the specified regex pattern exactly. Focus on extracting precise, relevant information that fits the required format."
+            payload["response_format"] = {"type": "json_object"} # For models that support it
 
-        # Prepare web search options if specified
-        web_search_options = {}
+        # Add recency filter (if we decide to add this param to structured_search)
+        # Add web_search_options (if we decide to add this param to structured_search)
         if search_context_size:
+            web_search_options: Dict[str, Any] = {}
             if search_context_size not in ["low", "medium", "high"]:
                 log.warning(
                     f"Invalid search_context_size '{search_context_size}'. Must be 'low', 'medium', or 'high'. Defaulting to 'medium'.")
                 search_context_size = "medium"
             web_search_options["search_context_size"] = search_context_size
-
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
-        ]
-
-        payload = {
-            "model": pplx_model,
-            "messages": messages,
-            "response_format": response_format,
-            "temperature": temperature
-        }
-
-        # Add web_search_options if specified
-        if web_search_options:
             payload["web_search_options"] = web_search_options
             log.debug(f"Using web_search_options: {web_search_options}")
 
-        try:
-            response_data = self._send_request(
-                "chat/completions", method="POST", data=payload)
-        except Exception as e:
-            log.error(
-                f"Perplexity structured_search API request failed: {e}",
-                exc_info=True)
-            return {
-                "query": query,
-                "result": f"[Could not retrieve answer due to API error: {e}]",
-                "structured_data": None,
-                "model": pplx_model}
-
-        # Default fallback
-        result = "[Could not retrieve a structured response from Perplexity.]"
-        structured_data = None
+        # Let exceptions from _send_request propagate
+        response_data = self._send_request(
+            "chat/completions", method="POST", data=payload)
 
         try:
-            # Extract raw result
-            result = self._extract_answer(response_data)
+            answer_content = self._extract_answer(response_data, default_answer="") # Get raw content
+            sources = self._extract_sources(response_data)
+            structured_data: Any = None
 
-            # Process the result differently based on format type
+            if not answer_content:
+                raise ValueError("Perplexity model returned an empty response.")
+
             if format_type == "json_schema":
                 try:
-                    structured_data = json.loads(result)
-                    log.info(
-                        f"Successfully parsed JSON response from structured search")
-                except json.JSONDecodeError as json_err:
-                    log.warning(
-                        f"Failed to parse standard JSON from structured search result: {json_err}")
-
-                    # Try to extract JSON with more flexible parsing
-                    if "{" in result and "}" in result:
-                        try:
-                            json_start = result.find("{")
-                            json_end = result.rfind("}") + 1
-                            json_str = result[json_start:json_end]
-                            structured_data = json.loads(json_str)
-                            log.info(
-                                f"Successfully parsed JSON after extracting from surrounding text")
-                        except json.JSONDecodeError:
-                            log.warning(
-                                f"Failed to parse JSON even after extraction attempt")
-                            structured_data = None
-
-            log.info(
-                f"Successfully retrieved structured search results from Perplexity model {pplx_model}")
+                    # Attempt to parse the answer content as JSON
+                    # Remove potential markdown code block fences if present
+                    cleaned_json_string = re.sub(r"^```json\n|\n```$", "", answer_content.strip(), flags=re.MULTILINE)
+                    structured_data = json.loads(cleaned_json_string)
+                    # Basic validation against the top-level keys of the schema could be added here if needed,
+                    # but Pydantic in the LLM should do deeper validation if the schema is complex.
+                except json.JSONDecodeError as je:
+                    log.error(f"Failed to decode JSON from Perplexity response for structured_search: {je}. Response content: {answer_content[:500]}")
+                    raise RuntimeError(f"Perplexity response was not valid JSON: {je}. Content: {answer_content[:200]}...") from je
+            elif format_type == "regex":
+                # For regex, the answer_content *is* the structured data (or should be)
+                # No further parsing needed here, but could add regex validation if desired.
+                structured_data = answer_content 
+            
+            log.info(f"Successfully retrieved and parsed structured data for '{query[:500]}'")
+            return {
+                "query": query,
+                "format_type": format_type,
+                "structured_data": structured_data,
+                "model": pplx_model,
+                "sources": sources
+            }
 
         except Exception as e:
+            # Catch any parsing related errors or the ValueError from empty response
             log.warning(
-                f"Could not extract response from structured search: {e}",
+                f"Could not extract or parse structured data from Perplexity response: {e}",
                 exc_info=True)
-            result = f"[Could not parse Perplexity response: {e}]"
-            structured_data = None
-
-        return {
-            "query": query,
-            "result": result,
-            "structured_data": structured_data,
-            "model": pplx_model
-        }
+            raise RuntimeError(f"Failed to process Perplexity response for structured_search: {e}") from e
 
     def health_check(self) -> Dict[str, Any]:
         """

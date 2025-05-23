@@ -7,11 +7,13 @@ import os
 import sys
 import time
 import asyncio
+import pytest # Add pytest
 
 # Add the root directory to Python path for imports (go up two levels from tests/debug)
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, root_dir)
 
+@pytest.mark.asyncio
 async def test_basic_startup():
     print("🔍 Testing basic bot startup...")
 

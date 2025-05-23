@@ -7,7 +7,7 @@ import uuid
 import os # Added import for os
 import sys # ADDED FOR DEBUGGING
 
-print(f"DEBUG: sys.path in {__file__}: {sys.path}") # ADDED FOR DEBUGGING
+# print(f"DEBUG: sys.path in {__file__}: {sys.path}") # ADDED FOR DEBUGGING
 
 # Contextvars for correlation IDs
 turn_id_var = contextvars.ContextVar("turn_id", default=None)
@@ -66,31 +66,27 @@ class JSONFormatter(logging.Formatter):
         if current_tool_call_id:
             log_entry["tool_call_id"] = current_tool_call_id
 
-        # Add event_type and details if provided in 'extra'
-        if hasattr(record, 'event_type'):
-            log_entry['event_type'] = record.event_type
-        else:
-            log_entry['event_type'] = "general"
+        log_entry['event_type'] = getattr(record, 'event_type', 'general')
 
-        # Add all other 'extra' fields, prioritizing 'details' if it exists
-        # These are fields passed via logger.info("...", extra={...})
+        # Collect all other custom attributes passed in 'extra'
+        custom_data_for_nesting = {}
         standard_record_attrs = set(logging.LogRecord('', '', '', '', '', '', '', '').__dict__.keys())
-        custom_attrs = {}
+        # Define keys that we've already explicitly handled at the top level
+        predefined_top_level_keys = {
+            'timestamp', 'level', 'message', 'logger_name', 'module', 
+            'function', 'line_no', 'turn_id', 'llm_call_id', 
+            'tool_call_id', 'event_type', 'exc_info', 'exc_text', 'stack_info',
+            'args', 'name', 'levelname', 'pathname', 'filename', 'module',
+            'lineno', 'funcName', 'created', 'asctime', 'msecs', 'relativeCreated',
+            'thread', 'threadName', 'process', 'message' # record.message is getMessage()
+        }
+
         for key, value in record.__dict__.items():
-            if key not in standard_record_attrs and key not in log_entry:
-                custom_attrs[key] = value
+            if key not in standard_record_attrs and key not in predefined_top_level_keys:
+                custom_data_for_nesting[key] = value
         
-        if 'details' in custom_attrs and isinstance(custom_attrs['details'], dict):
-            log_entry.update(custom_attrs.pop('details')) # Merge details directly
-
-        if custom_attrs: # Add remaining custom attributes under a 'data' key or merge if simple
-             # For simplicity, let's merge them if they don't conflict with top-level keys
-            for k, v in custom_attrs.items():
-                if k not in log_entry:
-                    log_entry[k] = v
-                else: # Handle potential conflicts, e.g., by prefixing
-                    log_entry[f"extra_{k}"] = v
-
+        if custom_data_for_nesting:
+            log_entry['data'] = custom_data_for_nesting
 
         # Add exception info if present
         if record.exc_info:

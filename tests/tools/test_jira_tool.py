@@ -8,6 +8,8 @@ import asyncio
 import sys
 import os
 
+import pytest # Add pytest
+
 # Add the current directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -15,6 +17,7 @@ from config import get_config
 from tools.jira_tools import JiraTools
 
 
+@pytest.mark.asyncio
 async def test_jira_tool():
     """Test the Jira tool directly."""
     print("🚀 Testing Jira Tool Directly")

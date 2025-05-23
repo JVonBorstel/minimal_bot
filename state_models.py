@@ -1,11 +1,12 @@
 import time
 import logging
 import uuid
+import json
 from typing import List, Dict, Any, Optional, Tuple, Literal, Union
 from datetime import datetime
 
 # Use Pydantic for state management
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from pydantic_core import PydanticCustomError  # For custom validation errors
 
 # Get logger for state management
@@ -14,6 +15,99 @@ log = logging.getLogger("state")
 from user_auth.models import UserProfile # Added import
 from user_auth.permissions import Permission, PermissionManager # Added imports
 from config import get_config # Added for RBAC check
+
+# Import our new safe message handler
+from bot_core.message_handler import SafeMessage, MessageProcessor, SafeTextPart
+
+# === Standard Library ===
+import asyncio
+import copy
+import json
+import logging
+import time
+import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union, Literal, Tuple, Callable
+
+# === Third Party ===
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+from pydantic.main import create_model
+
+# --- Define Message Part Models (as per guide's implication) ---
+class TextPart(BaseModel):
+    text: str
+    type: Literal["text"] = "text"
+
+class FunctionCallData(BaseModel):
+    name: str
+    args: Dict[str, Any]
+
+class FunctionCallPart(BaseModel):
+    function_call: FunctionCallData
+    type: Literal["function_call"] = "function_call"
+
+class FunctionResponseDataContent(BaseModel):
+    content: Any # Tool output, can be string, dict, etc.
+
+class FunctionResponseData(BaseModel):
+    name: str
+    response: FunctionResponseDataContent
+
+class FunctionResponsePart(BaseModel):
+    function_response: FunctionResponseData
+    type: Literal["function_response"] = "function_response"
+
+MessagePart = Union[TextPart, FunctionCallPart, FunctionResponsePart]
+
+class Message(BaseModel):
+    """Enhanced Message model with safe validation"""
+    model_config = ConfigDict(extra='forbid', validate_assignment=True)
+    
+    role: str = Field(description="Role of the message sender")
+    parts: List[SafeTextPart] = Field(default_factory=list, description="Message content parts")
+    raw_text: Optional[str] = Field(default=None, description="Original raw text")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional message metadata")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def safe_message_validation(cls, value: Any) -> Dict[str, Any]:
+        """Safely handle various message input formats"""
+        try:
+            # Use our enhanced message processor
+            safe_msg = MessageProcessor.safe_parse_message(value)
+            return {
+                "role": safe_msg.role,
+                "parts": safe_msg.parts,
+                "raw_text": safe_msg.raw_text,
+                "timestamp": datetime.now(),
+                "metadata": {}
+            }
+        except Exception as e:
+            log.warning(f"Message validation fallback triggered: {e}")
+            # Ultimate fallback
+            text_content = str(value) if value is not None else ""
+            return {
+                "role": "user",
+                "parts": [{"content": text_content}],
+                "raw_text": text_content,
+                "timestamp": datetime.now(),
+                "metadata": {}
+            }
+    
+    @property
+    def text(self) -> str:
+        """Get the message text content safely"""
+        if self.raw_text:
+            return self.raw_text
+        return "".join(part.content for part in self.parts)
+    
+    def get_text_content(self) -> str:
+        """Alternative method to get text content"""
+        return self.text
+
+# --- END: Message Part Models ---
 
 # --- Pydantic Models for Statistics ---
 
@@ -182,42 +276,101 @@ class WorkflowContext(BaseModel):
 # --- END: ADDED WorkflowContext DEFINITION ---
 
 # --- Pydantic Models for Tool Selection Analytics ---
-
-class ToolSelectionRecord(BaseModel):
-    """
-    Record of a tool selection event for analytics and learning.
-    """
-    timestamp: float = Field(default_factory=time.time)
-    query: str
-    selected_tools: List[str]  # List of tool names that were selected
-    used_tools: List[str] = []  # List of tools that were actually used
-    success_rate: Optional[float] = None  # Success rate if calculated
-
-
-class ToolSelectionMetrics(BaseModel):
-    """
-    Metrics for the tool selection system.
-    """
-    total_selections: int = 0
-    # Selection where at least one tool was used
-    successful_selections: int = 0
-    selection_records: List[ToolSelectionRecord] = Field(default_factory=list)
-
+# ToolSelectionRecord and ToolSelectionMetrics are now defined in user_auth.models to avoid circular imports.
 
 class AppState(BaseModel):
-    """
-    Represents the application's session state using Pydantic for structure.
-    Includes chat messages, UI selections, health status, and session metadata.
-    """
-    version: str = "v4_bot"  # Updated state schema version for bot
-
-    # Core State
-    session_id: str = Field(
-        default_factory=lambda: f"conv_{uuid.uuid4().hex[:8]}"
-    )  # Changed prefix for bot
-    messages: List[Dict[str, Any]] = Field(
-        default_factory=list
-    )  # Stores chat history
+    """Enhanced AppState with better message handling"""
+    model_config = ConfigDict(extra='allow', validate_assignment=True)
+    
+    # Core fields
+    version: str = Field(default="v4_bot", description="State schema version")
+    messages: List[Message] = Field(default_factory=list)
+    current_user_id: Optional[str] = None
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    
+    def add_message(self, role: str, content: Any) -> None:
+        """Safely add a message with enhanced validation"""
+        try:
+            # Handle various content formats
+            if isinstance(content, str):
+                message_data = {"role": role, "text": content}
+            elif isinstance(content, dict):
+                message_data = content.copy()
+                message_data["role"] = role
+            else:
+                # Convert any other type to string
+                message_data = {"role": role, "text": str(content)}
+            
+            # Validate text integrity before adding
+            text_content = MessageProcessor.safe_get_text(message_data)
+            if not MessageProcessor.validate_text_integrity(text_content):
+                log.warning(f"Text integrity issue detected, attempting repair")
+                # Try to fix common issues
+                if len(text_content) > 100 and ' ' not in text_content:
+                    # Might be a long string without spaces - this could be the character splitting issue
+                    log.error(f"Detected possible character splitting: '{text_content[:50]}...'")
+                    return  # Skip adding this malformed message
+            
+            message = Message.model_validate(message_data)
+            self.messages.append(message)
+            self.updated_at = datetime.now()
+            
+            log.debug(f"Successfully added message: role={role}, content_length={len(text_content)}")
+            
+        except Exception as e:
+            log.error(f"Failed to add message: {e}")
+            # Create a safe fallback message
+            try:
+                fallback_text = f"[Message processing error: {str(content)[:100]}]"
+                fallback_message = Message(
+                    role=role,
+                    parts=[SafeTextPart(content=fallback_text)],
+                    raw_text=fallback_text
+                )
+                self.messages.append(fallback_message)
+                log.info("Added fallback message due to processing error")
+            except Exception as fallback_error:
+                log.error(f"Even fallback message creation failed: {fallback_error}")
+    
+    def get_last_user_message(self) -> Optional[str]:
+        """Safely get the last user message"""
+        try:
+            for message in reversed(self.messages):
+                if message.role == "user":
+                    return message.text
+            return None
+        except Exception as e:
+            log.error(f"Error getting last user message: {e}")
+            return None
+    
+    def get_message_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get message history in a safe format"""
+        try:
+            recent_messages = self.messages[-limit:] if limit > 0 else self.messages
+            history = []
+            
+            for msg in recent_messages:
+                try:
+                    history.append({
+                        "role": msg.role,
+                        "content": msg.text,
+                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None
+                    })
+                except Exception as e:
+                    log.warning(f"Error processing message in history: {e}")
+                    # Add a safe fallback entry
+                    history.append({
+                        "role": "system",
+                        "content": f"[Error processing message: {str(e)}]",
+                        "timestamp": datetime.now().isoformat()
+                    })
+            
+            return history
+        except Exception as e:
+            log.error(f"Error getting message history: {e}")
+            return []
 
     # Add current_user field
     current_user: Optional[UserProfile] = Field(default=None, description="The UserProfile of the current user.")
@@ -309,11 +462,6 @@ class AppState(BaseModel):
     previous_tool_calls: List[Tuple[str, str, str, str]] = Field(
         default_factory=list,
         description="Tracks previous tool calls to detect circular patterns (id, name, args_str, hash)"
-    )
-
-    # --- Tool Selection Metrics ---
-    tool_selection_metrics: ToolSelectionMetrics = Field(
-        default_factory=ToolSelectionMetrics
     )
 
     # --- NEW Workflow State Fields ---
@@ -410,60 +558,103 @@ class AppState(BaseModel):
         return user_has_perm
 
     # --- Model Configuration ---
-    class Config:
-        # Allow complex types like SessionDebugStats
-        arbitrary_types_allowed = True
-        # Enable validation on attribute assignment
-        validate_assignment = True
-        # Allow arbitrary attributes (like methods added for testing)
-        extra = "allow"
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        validate_assignment=True,
+        extra="allow"
+    )
 
     # --- Methods for Core State Management ---
     def add_message(
         self,
-        role: str,
-        content: Optional[str] = None,
-        tool_calls: Optional[List[Dict]] = None,
+        role: Literal["user", "model", "function", "system"],
+        parts: Optional[List[MessagePart]] = None, # Expect parts directly
+        # Deprecate old direct content/tool_calls parameters in favor of parts
+        content: Optional[str] = None, # Kept for backward compatibility during transition
+        tool_calls: Optional[List[Dict]] = None, # Kept for backward compatibility
+        function_name: Optional[str] = None, # For role='function' backward compatibility
+        tool_call_id_for_response: Optional[str] = None, # For role='function' backward compatibility
         **kwargs
     ) -> None:
-        """Adds a message to the chat history with structured metadata."""
-        if not content and not tool_calls:
+        """Adds a message to the chat history using the new Message and Part structure."""
+        
+        processed_parts: List[MessagePart] = []
+
+        if parts:
+            processed_parts.extend(parts)
+        elif role == "user" and content:
+            processed_parts.append(TextPart(text=content))
+        elif (role == "model" or role == "assistant") and content and not tool_calls: # Handle simple text for model/assistant
+            processed_parts.append(TextPart(text=content))
+        elif (role == "model" or role == "assistant") and tool_calls: # Handle tool_calls for model/assistant
+            if content: # If there's also text content with tool calls
+                processed_parts.append(TextPart(text=content))
+            for tc_data in tool_calls:
+                # Check for the more detailed structure first (e.g., from LLM response)
+                if (isinstance(tc_data, dict) and
+                    isinstance(tc_data.get("function"), dict) and
+                    tc_data.get("function").get("name") and
+                    isinstance(tc_data.get("function").get("arguments"), dict)):
+                    processed_parts.append(FunctionCallPart(function_call=FunctionCallData(
+                        name=tc_data["function"]["name"],
+                        args=tc_data["function"]["arguments"] # Corrected: was tc_data["function"]["args"]
+                    )))
+                # Check for a simpler direct structure (e.g. internal representation)
+                elif (isinstance(tc_data, dict) and 
+                      tc_data.get("name") and 
+                      isinstance(tc_data.get("args"), dict)):
+                    processed_parts.append(FunctionCallPart(function_call=FunctionCallData(
+                        name=tc_data["name"],
+                        args=tc_data["args"]
+                    )))
+                else:
+                    log.warning(f"Unsupported tool_call structure in add_message for role '{role}': {tc_data}")
+        elif role == "function" and function_name and content: # content is tool output here
+            # tool_call_id_for_response is the ID of the call this is a response to.
+            # The guide's `prepare_messages_for_llm_from_appstate` expects the `FunctionResponsePart` to contain the `name` of the function.
+            # The `tool_call_id` isn't directly part of the `FunctionResponsePart` model in the guide, but it's vital for linking.
+            # We will store it in metadata if provided.
+            actual_tool_output_content: Any
+            try:
+                actual_tool_output_content = json.loads(content)
+            except json.JSONDecodeError:
+                actual_tool_output_content = content # Store as string if not JSON
+
+            processed_parts.append(FunctionResponsePart(function_response=FunctionResponseData(
+                name=function_name,
+                response=FunctionResponseDataContent(content=actual_tool_output_content)
+            )))
+            if tool_call_id_for_response and "metadata" not in kwargs:
+                kwargs["metadata"] = {}
+            if tool_call_id_for_response:
+                kwargs["metadata"]["tool_call_id"] = tool_call_id_for_response
+        elif role == "system" and content:
+            processed_parts.append(TextPart(text=content))
+        
+        if not processed_parts:
             log.warning(
-                f"Attempted to add message with no content or tool calls "
-                f"for role '{role}'. Skipping."
+                f"Attempted to add message for role '{role}' but no parts could be processed/created. "
+                f"Original content: '{str(content)[:50]}...', Original tool_calls: {tool_calls}. Skipping."
             )
             return
 
-        message = {
-            "id": f"msg_{uuid.uuid4().hex[:8]}",  # Unique ID for each message
-            "role": role,
-            "content": content,
-            "tool_calls": tool_calls,  # Store requested tool calls
-            "timestamp": time.time(),  # Add timestamp automatically
-            "is_error": kwargs.pop("is_error", False),  # Extract error flag
-            "is_internal": kwargs.pop("is_internal", False),  # Internal flag
-            "message_type": kwargs.pop("message_type", None),  # Extract type
-            "name": kwargs.pop("name", None),  # Function name
-            "tool_call_id": kwargs.pop("tool_call_id", None),  # Tool call ID
-            "metadata": kwargs.pop("metadata", {})  # Store any extra metadata
-        }
-        # Ensure metadata is a dict
-        if message["metadata"] is None:
-            message["metadata"] = {}
-        # Merge remaining kwargs into metadata
-        message["metadata"].update(kwargs)
+        message_obj = Message(
+            role=role,
+            parts=processed_parts,
+            is_error=kwargs.pop("is_error", False),
+            is_internal=kwargs.pop("is_internal", False),
+            message_type=kwargs.pop("message_type", None),
+            metadata=kwargs.pop("metadata", {})
+        )
+        
+        # Merge any remaining kwargs into metadata if they weren't standard Message fields
+        message_obj.metadata.update(kwargs)
 
-        # Clean None values for cleaner storage/display
-        message = {k: v for k, v in message.items() if v is not None}
-
-        # Add the message
         try:
-            # Use standard list append
-            self.messages.append(message)
+            self.messages.append(message_obj)
             log.debug(
-                f"Added message ({message.get('id', '')}) - Role: {role}, "
-                f"Internal: {message.get('is_internal', False)}, "
-                f"Type: {message.get('message_type', 'N/A')}"
+                f"Added message - Role: {role}, Parts: {len(message_obj.parts)}, "
+                f"Internal: {message_obj.is_internal if hasattr(message_obj, 'is_internal') else 'N/A'}, Type: {message_obj.message_type if hasattr(message_obj, 'message_type') else 'N/A'}"
             )
         except ValidationError as e:
             log.error(f"Pydantic validation error adding message: {e}")
