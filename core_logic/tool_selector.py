@@ -20,9 +20,16 @@ import time
 import re
 from typing import Dict, List, Any, Optional, Union, Tuple
 
-# Vector database and embedding libraries
-import numpy as np
-from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found] # noqa: E501
+# Try to import ML dependencies, fallback gracefully if not available
+try:
+    import numpy as np
+    from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found] # noqa: E501
+    ML_DEPENDENCIES_AVAILABLE = True
+except ImportError:
+    # Create mock objects for when dependencies aren't available
+    np = None
+    SentenceTransformer = None
+    ML_DEPENDENCIES_AVAILABLE = False
 
 # Project-specific imports
 # AGENT: The import below assumes `config.py` is in the root and
@@ -50,8 +57,8 @@ class ToolSelector:
         """
         self.config = config
         self.embedding_model = None
-        # tool_name -> embedding
-        self.tool_embeddings: Dict[str, Union[np.ndarray, List[float]]] = {}
+        # tool_name -> embedding (numpy array if available, list of floats otherwise)
+        self.tool_embeddings: Dict[str, Union[Any, List[float]]] = {}
         # tool_name -> metadata
         self.tool_metadata: Dict[str, Dict[str, Any]] = {}
         
@@ -217,7 +224,7 @@ class ToolSelector:
 
         return optimized
 
-    def generate_tool_embedding(self, tool_def: Dict[str, Any]) -> np.ndarray:
+    def generate_tool_embedding(self, tool_def: Dict[str, Any]) -> Optional[Any]:
         """
         Generate an embedding vector for a tool definition.
 
@@ -225,10 +232,11 @@ class ToolSelector:
             tool_def: Tool definition dictionary
 
         Returns:
-            numpy array containing the embedding vector
+            numpy array containing the embedding vector, or None if ML dependencies unavailable
         """
-        if not self.embedding_model:
-            raise ValueError("Embedding model not initialized")
+        if not ML_DEPENDENCIES_AVAILABLE or not self.embedding_model:
+            log.debug("Cannot generate embedding: ML dependencies or embedding model not available")
+            return None
 
         # Create a rich text representation of the tool
         tool_text = self._create_tool_text_representation(tool_def)
@@ -369,7 +377,7 @@ class ToolSelector:
             # Convert numpy arrays to lists for serialization
             serializable_embeddings = {}
             for name, embedding in self.tool_embeddings.items():
-                if isinstance(embedding, np.ndarray):
+                if ML_DEPENDENCIES_AVAILABLE and np and isinstance(embedding, np.ndarray):
                     serializable_embeddings[name] = embedding.tolist()
                 else:
                     serializable_embeddings[name] = embedding
@@ -462,7 +470,7 @@ class ToolSelector:
 
             # Convert lists back to numpy arrays
             for name, embedding_list in self.tool_embeddings.items():
-                if isinstance(embedding_list, list):
+                if isinstance(embedding_list, list) and ML_DEPENDENCIES_AVAILABLE and np:
                     self.tool_embeddings[name] = np.array(embedding_list)
 
             log.info(
@@ -533,16 +541,25 @@ class ToolSelector:
 
     def _initialize_embedding_model(self):
         """Initialize the embedding model for semantic search."""
+        if not ML_DEPENDENCIES_AVAILABLE:
+            log.warning(
+                "ML dependencies (numpy, sentence-transformers) not available. "
+                "Tool selection will use simple pattern matching fallback."
+            )
+            self.embedding_model = None
+            return
+            
         try:
             # Get model name from config
             model_name = self.settings.get("embedding_model", "all-MiniLM-L6-v2")
             self.embedding_model = SentenceTransformer(model_name)
             log.info(f"Initialized embedding model: {model_name}")
         except Exception as e:
-            log.error(
-                f"Failed to initialize embedding model: {e}", exc_info=True
+            log.warning(
+                f"Failed to initialize embedding model: {e}. "
+                "Falling back to pattern matching tool selection."
             )
-            raise
+            self.embedding_model = None
 
     def select_tools(
         self,
@@ -653,6 +670,22 @@ class ToolSelector:
             return selected_tools[:max_tool_count]
 
         # Generate embedding for the query
+        if not ML_DEPENDENCIES_AVAILABLE or not self.embedding_model:
+            log.info("ML dependencies not available. Using pattern matching tool selection only.")
+            # Use only pattern-matched tools when ML is not available
+            selected_tools = []
+            for tool_name in intent_matched_tools + entity_boosted_tools + list(always_include_names):
+                if tool_name in tool_name_to_def and tool_name not in [t.get("name") for t in selected_tools]:
+                    if tool_name in self.tool_metadata and self.tool_metadata[tool_name]:
+                        selected_tools.append(self.tool_metadata[tool_name])
+                    else:
+                        selected_tools.append(tool_name_to_def[tool_name])
+                if len(selected_tools) >= max_tool_count:
+                    break
+            if not selected_tools and self.default_fallback:
+                return available_tools[:min(max_tool_count, len(available_tools))]
+            return selected_tools[:max_tool_count]
+            
         query_embedding = self.embedding_model.encode(query)
 
         # Calculate similarity scores between query and all tools
@@ -678,6 +711,10 @@ class ToolSelector:
                 
             # Skip if tool is not in available tools
             if tool_name not in tool_name_to_def:
+                continue
+
+            # Only proceed with similarity if ML dependencies are available
+            if not ML_DEPENDENCIES_AVAILABLE or not np:
                 continue
                 
             tool_embedding = np.array(tool_embedding_data) \
@@ -1024,8 +1061,9 @@ class ToolSelector:
         Returns:
             List of (tool_name, similarity_score) tuples
         """
-        if not self.embedding_model:
-            raise ValueError("Embedding model not initialized")
+        if not ML_DEPENDENCIES_AVAILABLE or not self.embedding_model:
+            log.warning("ML dependencies not available or embedding model not initialized. Cannot find similar tools.")
+            return []
         
         # Handle empty embeddings dictionary
         if not self.tool_embeddings:
@@ -1038,6 +1076,9 @@ class ToolSelector:
         # Calculate similarity for all tools
         similarities = []
         for tool_name, tool_embedding_data in self.tool_embeddings.items():
+            if not np:
+                continue
+                
             tool_embedding = np.array(tool_embedding_data) \
                 if isinstance(tool_embedding_data, list) \
                 else tool_embedding_data
