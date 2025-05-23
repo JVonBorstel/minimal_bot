@@ -137,10 +137,8 @@ async def help(topic: str = None, config: Config = None) -> Dict[str, Any]:
             }
             help_response["sections"].append(topic_section)
     
-    return {
-        "status": "SUCCESS",
-        "data": help_response
-    }
+    # Return just the help_response data - the decorator will wrap it
+    return help_response
 
 
 # You can add more core tools here in the future
