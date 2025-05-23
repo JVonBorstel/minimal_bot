@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # --- SQLAlchemy Engine and Session Setup ---
 _engine = None
-_SessionLocal: Optional[sessionmaker[SQLAlchemySession]] = None
+_SessionLocal: Optional[sessionmaker] = None
 
 def _get_engine():
     """Initializes and returns the SQLAlchemy engine."""
@@ -33,12 +33,12 @@ def _get_engine():
         logger.info(f"SQLAlchemy engine initialized for database: {db_url}")
     return _engine
 
-def _get_session_local() -> sessionmaker[SQLAlchemySession]:
+def _get_session_local() -> sessionmaker:
     """Initializes and returns the SQLAlchemy sessionmaker."""
     global _SessionLocal
     if _SessionLocal is None:
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_get_engine())
-    return _SessionLocal 
+    return _SessionLocal
 
 @contextmanager
 def get_session() -> Generator[SQLAlchemySession, None, None]:
