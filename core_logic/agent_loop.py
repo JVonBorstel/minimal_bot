@@ -214,9 +214,17 @@ async def start_streaming_response(
             help_keywords = ["help", "what can you do", "show commands", "available tools"]
             is_help_command = any(keyword in latest_user_message for keyword in help_keywords)
 
+        # CRITICAL DEBUG: Log exactly what we're working with
+        log.info(f"🔍 AGENT LOOP DEBUG - latest_user_message: '{latest_user_message}'", extra={"event_type": "agent_loop_debug"})
+        log.info(f"🔍 AGENT LOOP DEBUG - messages count: {len(app_state.messages)}", extra={"event_type": "agent_loop_debug"})
+        if app_state.messages:
+            log.info(f"🔍 AGENT LOOP DEBUG - last message role: {app_state.messages[-1].get('role')}", extra={"event_type": "agent_loop_debug"})
+
         # Check for multi-tool workflow patterns
         from .workflow_orchestrator import detect_workflow_intent, WorkflowOrchestrator
+        log.info(f"🔍 WORKFLOW DEBUG - About to call detect_workflow_intent with: '{latest_user_message}'", extra={"event_type": "workflow_debug"})
         workflow_intent = detect_workflow_intent(latest_user_message) if latest_user_message else None
+        log.info(f"🔍 WORKFLOW DEBUG - detect_workflow_intent returned: '{workflow_intent}'", extra={"event_type": "workflow_debug"})
         
         if workflow_intent:
             log.info(f"Detected multi-tool workflow: {workflow_intent}", extra={"event_type": "workflow_intent_detected"})
@@ -248,7 +256,7 @@ async def start_streaming_response(
                 yield {'type': 'error', 'content': f"Failed to execute workflow: {str(e)}"}
                 app_state.last_interaction_status = "ERROR"
                 return
-
+        
         # Continue with existing workflow logic...
 
         # FIXED: Always provide ALL available tools to the LLM

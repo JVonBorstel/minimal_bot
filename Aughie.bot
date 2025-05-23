@@ -1,9 +1,26 @@
 {
   "name": "Aughie",
-  "description": "",
-  "services": [],
+  "description": "Light-MVP ChatOps Bot for Teams Integration",
+  "services": [
+    {
+      "type": "endpoint",
+      "name": "Aughie Local Development (With Auth)",
+      "endpoint": "http://localhost:8501/api/messages",
+      "appId": "ddefbb36-1d7e-4d4f-9497-795a4200b6db",
+      "appPassword": "yXX8Q~U1vZEaY.rmDai_jYPnB5YI2d.MVCxiqbJq",
+      "id": "local-dev-auth"
+    },
+    {
+      "type": "endpoint",
+      "name": "Aughie Local Development (No Auth)",
+      "endpoint": "http://localhost:8501/api/messages",
+      "appId": "",
+      "appPassword": "",
+      "id": "local-dev-noauth"
+    }
+  ],
   "padlock": "",
   "version": "2.0",
-  "path": "C:\\Users\\jvonborstel\\Desktop\\Dev Work\\Projects\\InProgress\\Light-MVP\\Aughie.bot",
+  "path": "C:\\Users\\Jorda\\Desktop\\minimal_bot\\Aughie.bot",
   "overrides": null
 }

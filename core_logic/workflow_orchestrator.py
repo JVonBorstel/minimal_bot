@@ -349,13 +349,30 @@ class WorkflowOrchestrator:
         tickets = jira_result.get("data", []) if isinstance(jira_result, dict) else jira_result
         
         synthesis = []
-        synthesis.append(f"📊 **Repository vs Ticket Analysis**")
-        synthesis.append(f"🗂️ Found {len(repos)} repositories and {len(tickets)} Jira tickets")
+        synthesis.append(f"📊 **Repository vs Ticket Analysis** ({len(repos)} repos, {len(tickets)} tickets)")
+        synthesis.append("")
+        
+        # Format in two columns as often requested
+        synthesis.append("| 📁 **GitHub Repositories** | 🎫 **Jira Tickets** |")
+        synthesis.append("|---------------------------|-------------------|")
+        
+        max_items = max(len(repos), len(tickets))
+        for i in range(max_items):
+            repo_name = ""
+            ticket_name = ""
+            
+            if i < len(repos) and isinstance(repos[i], dict):
+                repo_name = f"{repos[i].get('name', 'Unknown')}"
+                
+            if i < len(tickets) and isinstance(tickets[i], dict):
+                ticket_name = f"{tickets[i].get('key', 'Unknown')} - {tickets[i].get('summary', 'No summary')[:40]}..."
+            
+            synthesis.append(f"| {repo_name} | {ticket_name} |")
+        
+        synthesis.append("")
         
         # Look for correlations
         repo_names = [repo.get("name", "") for repo in repos if isinstance(repo, dict)]
-        ticket_summaries = [ticket.get("summary", "") for ticket in tickets if isinstance(ticket, dict)]
-        
         correlations = []
         for repo_name in repo_names:
             for ticket in tickets:
@@ -365,10 +382,10 @@ class WorkflowOrchestrator:
                         correlations.append(f"🔗 Repo '{repo_name}' mentioned in ticket {ticket.get('key', 'Unknown')}")
         
         if correlations:
-            synthesis.append("\n**Found Correlations:**")
+            synthesis.append("**🔗 Found Correlations:**")
             synthesis.extend(correlations)
         else:
-            synthesis.append("\n⚠️ No obvious correlations found between repo names and ticket content.")
+            synthesis.append("⚠️ No obvious correlations found between repo names and ticket content.")
         
         return "\n".join(synthesis)
     
@@ -583,6 +600,15 @@ def detect_workflow_intent(user_query: str) -> Optional[str]:
         log.info(f"Detected workflow intent: repo_jira_comparison from query: {user_query}")
         return "repo_jira_comparison"
     
+    # CRITICAL: Detect requests for BOTH repos and tickets
+    has_github = any(keyword in query_lower for keyword in ["repo", "repositories", "github", "projects", "code"])
+    has_jira = any(keyword in query_lower for keyword in ["ticket", "tickets", "jira", "issue", "issues", "task", "tasks"])
+    wants_both = any(keyword in query_lower for keyword in ["and", "both", "two", "columns", "together", "along with"])
+    
+    if has_github and has_jira and (wants_both or ("list" in query_lower and "my" in query_lower)):
+        log.info(f"Detected workflow intent: repo_jira_comparison from query: {user_query}")
+        return "repo_jira_comparison"
+    
     # ULTRA-GENERAL DETECTION - catch ANY data request
     
     # GitHub repository requests
@@ -595,7 +621,9 @@ def detect_workflow_intent(user_query: str) -> Optional[str]:
     # Jira ticket requests  
     jira_keywords = ["ticket", "tickets", "jira", "issue", "issues", "task", "tasks", "todo", "assigned"]
     if any(keyword in query_lower for keyword in jira_keywords):
-        if "detail" in query_lower or "deeper" in query_lower or "more" in query_lower or "expand" in query_lower:
+        # Check for detail/deep dive requests with more variations
+        detail_keywords = ["detail", "deeper", "more", "expand", "deep dive", "dive", "explain", "breakdown", "specifics"]
+        if any(detail_word in query_lower for detail_word in detail_keywords):
             log.info(f"Detected workflow intent: detailed_jira_tickets from query: {user_query}")
             return "detailed_jira_tickets"
         elif any(word in query_lower for word in ["list", "show", "my", "what", "which", "display", "get"]):

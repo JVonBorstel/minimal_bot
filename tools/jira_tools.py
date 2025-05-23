@@ -183,6 +183,24 @@ class JiraTools:
         """Checks if a Jira client is available, raising ValueError if not."""
         client = self._get_jira_client(app_state)
         if not client:
+            # FALLBACK: Try to re-initialize the shared client if config is available
+            if all([self.jira_url, self.jira_email, self.jira_token]) and not self.jira_client:
+                log.warning("Jira client is None but configuration is available. Attempting to re-initialize...")
+                try:
+                    options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
+                    self.jira_client = JIRA(
+                        options=options,
+                        basic_auth=(self.jira_email, self.jira_token),
+                        timeout=self.config.DEFAULT_API_TIMEOUT_SECONDS,
+                        max_retries=0
+                    )
+                    server_info = self.jira_client.server_info()
+                    log.info(f"Jira client re-initialized successfully. Connected to: {server_info.get('baseUrl', self.jira_url)}")
+                    return self.jira_client
+                except Exception as e:
+                    log.error(f"Failed to re-initialize Jira client: {e}")
+                    self.jira_client = None
+            
             log.error("No Jira client available. Configuration might be missing or incorrect.")
             raise ValueError("Jira client not available. Please check Jira API configuration or provide personal credentials.")
         return client
@@ -243,7 +261,7 @@ class JiraTools:
           }
     )
     @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
-    async def get_issues_by_user(self, app_state: AppState, user_email: str, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
+    async def get_issues_by_user(self, app_state: AppState, user_email: str, status_category: Optional[Literal["to do", "in progress", "done"]] = None, max_results: int = 15) -> List[Dict[str, Any]]:
         """
         Finds issues assigned to a user by their email address, optionally filtered by status category.
         Now supports personal Jira credentials for enhanced access.
@@ -251,7 +269,7 @@ class JiraTools:
         Args:
             app_state: Application state containing user profile (injected by tool framework)
             user_email: The email address of the user.
-            status_category: Optional. Filter by status category: 'to do', 'in progress', 'done'. Defaults to 'to do'.
+            status_category: Optional. Filter by status category: 'to do', 'in progress', 'done'. Defaults to None (all statuses).
             max_results: Optional. Maximum number of issues to return. Defaults to 15.
 
         Returns:
@@ -264,11 +282,14 @@ class JiraTools:
         log.info(f"Searching for Jira issues assigned to user: {user_email}, status_category: {status_category}, max_results: {max_results}")
 
         try:
-            jql_parts = [f"assignee = \"{user_email}\" OR assignee = currentUser() AND reporter = \"{user_email}\""]
+            # EMERGENCY FIX: Use currentUser() which is more reliable than email
+            # The email-based search often fails due to user account differences
+            jql_parts = [f"(assignee = currentUser() OR reporter = currentUser())"]
+            
             if status_category:
                 status_map = {
                     "to do": "To Do",
-                    "in progress": "In Progress",
+                    "in progress": "In Progress", 
                     "done": "Done"
                 }
                 jql_status_category = status_map.get(status_category.lower())

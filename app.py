@@ -478,25 +478,30 @@ SERVER_APP.router.add_get("/healthz", healthz)
 SERVER_APP.on_cleanup.append(on_bot_shutdown)
 
 if __name__ == "__main__":
-    port_to_use = 3978  # Default Bot Framework port
+    # Get port from environment variable (Railway provides this) or use default
+    port_to_use = int(os.environ.get("PORT", 3978))
+    
     try:
-        # Use PORT from APP_SETTINGS if available and valid
+        # Detect if we're running on Railway vs local development
+        if os.environ.get("RAILWAY_ENVIRONMENT_ID") or os.environ.get("RAILWAY_PROJECT_ID"):
+            # Railway deployment - bind to all interfaces
+            host_to_use = "0.0.0.0"
+        else:
+            # Local development - use localhost for Bot Framework Emulator compatibility
+            host_to_use = "localhost"
+        
+        # Override with APP_SETTINGS.PORT only if it's explicitly set and valid
         if hasattr(APP_SETTINGS, 'PORT') and \
            APP_SETTINGS.PORT and \
-           isinstance(APP_SETTINGS.PORT, int):
+           isinstance(APP_SETTINGS.PORT, int) and \
+           os.environ.get("PORT") is None:  # Don't override Railway's PORT
             port_to_use = APP_SETTINGS.PORT
-        else:
-            logger.warning(
-                f"APP_SETTINGS.PORT not found or invalid "
-                f"('{getattr(APP_SETTINGS, 'PORT', 'N/A')}'). "
-                f"Using default port {port_to_use}."
-            )
 
         # Matches SECTIONS["STARTUP"]["start"]
         logger.info(
-            f"Bot server starting on http://localhost:{port_to_use}"
+            f"Bot server starting on {host_to_use}:{port_to_use}"
         )
-        web.run_app(SERVER_APP, host="localhost", port=port_to_use)
+        web.run_app(SERVER_APP, host=host_to_use, port=port_to_use)
         # Note: A "server running" or "ready" message for
         # SECTIONS["STARTUP"]["end"]
         # would typically come from aiohttp's startup signals if desired.

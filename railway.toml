@@ -9,7 +9,6 @@ restartPolicyMaxRetries = 10
 name = "minimal-bot"
 
 [services.variables]
-PORT = "3978"
 PYTHONPATH = "/app"
 PYTHONUNBUFFERED = "1"
 
