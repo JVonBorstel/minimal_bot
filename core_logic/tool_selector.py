@@ -618,6 +618,15 @@ class ToolSelector:
                 log.info("Help command detected. Returning only help tool.")
                 return [help_tool]
         
+        # CRITICAL FIX: For GitHub repository queries, always ensure GitHub tool is selected
+        query_lower = query.lower()
+        github_repo_keywords = ['repos', 'repositories', 'github', 'repository']
+        if any(keyword in query_lower for keyword in github_repo_keywords):
+            github_tool = tool_name_to_def.get('github_list_repositories')
+            if github_tool and 'github_list_repositories' not in intent_matched_tools and 'github_list_repositories' not in entity_boosted_tools:
+                log.info("GitHub repository query detected - forcing GitHub tool selection")
+                entity_boosted_tools.append('github_list_repositories')
+        
         # First, add any "always include" tools to the results
         always_include_names = set(self.always_include_tools)
         selected_tool_names = set(intent_matched_tools + entity_boosted_tools)
@@ -842,7 +851,8 @@ class ToolSelector:
     
     def _identify_entity_mentions(self, query: str, tool_dict: Dict[str, Dict[str, Any]]) -> List[str]:
         """
-        Identifies entity mentions in the query that might indicate specific tools.
+        Identifies entity mentions in the query using simple keyword matching.
+        This is more reliable than complex regex patterns.
         
         Args:
             query: The user query
@@ -854,86 +864,52 @@ class ToolSelector:
         boosted_tools = []
         query_lower = query.lower()
         
-        # Check for GitHub patterns
-        github_patterns = {
-            r'@[\w-]+/[\w-]+': ['github_list_repositories'],
-            r'[\w-]+/[\w-]+': ['github_list_repositories'],
-            r'(?:list|show)\s+(?:repos|repositories)': ['github_list_repositories'],
-            r'search\s+(?:github\s+)?code': ['github_search_code'],
-            r'find\s+(?:in\s+)?code': ['github_search_code']
-        }
+        # Simple keyword-based GitHub detection
+        github_keywords = ['repos', 'repositories', 'github', 'repository']
+        list_keywords = ['list', 'show', 'get', 'my']
         
-        for pattern, tools in github_patterns.items():
-            if re.search(pattern, query_lower):
-                for tool in tools:
-                    if tool in tool_dict and tool not in boosted_tools:
-                        boosted_tools.append(tool)
+        # If query contains GitHub keywords AND list keywords → trigger GitHub tool
+        if any(keyword in query_lower for keyword in github_keywords) and \
+           any(keyword in query_lower for keyword in list_keywords):
+            if 'github_list_repositories' in tool_dict:
+                boosted_tools.append('github_list_repositories')
         
-        # Check for Jira patterns
-        jira_patterns = {
-            r'[A-Z]+-\d+': ['jira_get_issues_by_user'],
-            r'(?:my\s+)?(?:jira\s+)?(?:issues|tickets)': ['jira_get_issues_by_user']
-        }
+        # Simple Jira detection
+        jira_keywords = ['jira', 'tickets', 'issues', 'ticket', 'issue']
+        my_keywords = ['my', 'mine']
         
-        for pattern, tools in jira_patterns.items():
-            if re.search(pattern, query):
-                for tool in tools:
-                    if tool in tool_dict and tool not in boosted_tools:
-                        boosted_tools.append(tool)
+        if any(keyword in query_lower for keyword in jira_keywords) and \
+           any(keyword in query_lower for keyword in my_keywords):
+            if 'jira_get_issues_by_user' in tool_dict:
+                boosted_tools.append('jira_get_issues_by_user')
         
-        # Check for file operations
-        file_patterns = {
-            r'read\s+file': ['read_file'],
-            r'open\s+file': ['read_file'],
-            r'write\s+to\s+file': ['edit_file'],
-            r'list\s+(?:files|directory)': ['list_dir'],
-            r'show\s+(?:files|directory)': ['list_dir']
-        }
+        # Simple code search detection
+        code_keywords = ['code', 'function', 'method', 'class', 'search code', 'find code']
+        if any(keyword in query_lower for keyword in code_keywords):
+            for tool in ['greptile_search_code', 'github_search_code']:
+                if tool in tool_dict and tool not in boosted_tools:
+                    boosted_tools.append(tool)
         
-        for pattern, tools in file_patterns.items():
-            if re.search(pattern, query_lower):
-                for tool in tools:
-                    if tool in tool_dict and tool not in boosted_tools:
-                        boosted_tools.append(tool)
+        # Simple web search detection  
+        web_keywords = ['weather', 'news', 'current', 'latest', 'online', 'web search']
+        if any(keyword in query_lower for keyword in web_keywords):
+            if 'perplexity_web_search' in tool_dict and 'perplexity_web_search' not in boosted_tools:
+                boosted_tools.append('perplexity_web_search')
         
-        # Check for semantic code search patterns
-        code_patterns = {
-            r'search\s+(?:code|codebase)': ['greptile_search_code', 'github_search_code'],
-            r'find\s+(?:in\s+code|function|method|class)': ['greptile_search_code', 'github_search_code'],
-            r'where\s+is\s+[\w_]+\s+(?:defined|implemented)': ['greptile_get_symbol_info']
-        }
-        
-        for pattern, tools in code_patterns.items():
-            if re.search(pattern, query_lower):
-                for tool in tools:
-                    if tool in tool_dict and tool not in boosted_tools:
-                        boosted_tools.append(tool)
-        
-        # Check for web search patterns
-        web_patterns = {
-            r'(?:search|find)(?:\s+for)?\s+(?:online|web|internet)': ['perplexity_web_search'],
-            r'(?:current|latest|recent)(?:\s+news|\s+weather|\s+information)': ['perplexity_web_search'],
-            r'what\s+is\s+(?:the\s+)?(?:weather|news|status)': ['perplexity_web_search']
-        }
-        
-        for pattern, tools in web_patterns.items():
-            if re.search(pattern, query_lower):
-                for tool in tools:
-                    if tool in tool_dict and tool not in boosted_tools:
-                        boosted_tools.append(tool)
-        
-        # Check for direct tool name mentions
-        for tool_name in tool_dict.keys():
-            base_name = tool_name.split('_', 1)[-1] if '_' in tool_name else tool_name
-            if base_name.lower() in query_lower.replace('_', ' '):
-                if tool_name not in boosted_tools:
-                    boosted_tools.append(tool_name)
+        # File operations
+        if 'read file' in query_lower or 'open file' in query_lower:
+            if 'read_file' in tool_dict:
+                boosted_tools.append('read_file')
+        if 'list files' in query_lower or 'list directory' in query_lower:
+            if 'list_dir' in tool_dict:
+                boosted_tools.append('list_dir')
         
         return boosted_tools
 
     def _identify_direct_intents(self, query: str, tool_dict: Dict[str, Dict[str, Any]]) -> List[str]:
         """
-        Identifies direct tool selection intents in the query using structured patterns.
+        Identifies direct tool selection intents using simple keyword matching.
+        This is much more reliable than complex regex patterns.
         
         Args:
             query: The user query
@@ -945,44 +921,34 @@ class ToolSelector:
         direct_tools = []
         query_lower = query.lower()
         
-        # Help command patterns - these should always trigger the help tool
-        help_patterns = [
-            r'@bot help',
-            r'@bot what can you do',
-            r'@bot commands',
-            r'help me',
-            r'what can you do',
-            r'how do you work',
-            r'show me your commands',
-            r'list your features',
-            r'what are your capabilities'
-        ]
+        # Help commands
+        help_phrases = ['help', 'what can you do', 'commands', 'capabilities']
+        if any(phrase in query_lower for phrase in help_phrases):
+            if 'help' in tool_dict:
+                return ['help']  # Return only help tool for help commands
         
-        # Check for help commands first
-        for pattern in help_patterns:
-            if re.search(pattern, query_lower):
-                help_tool = next((name for name in tool_dict.keys() if name == "help"), None)
-                if help_tool:
-                    return [help_tool]  # Return only the help tool for help commands
+        # GitHub repository requests
+        if ('repos' in query_lower or 'repositories' in query_lower) and \
+           ('my' in query_lower or 'list' in query_lower or 'show' in query_lower):
+            if 'github_list_repositories' in tool_dict:
+                direct_tools.append('github_list_repositories')
         
-        # Strong intent patterns that should map directly to specific tools
-        intent_patterns = {
-            r'(?:show|get|fetch)\s+(?:my\s+)?(?:open|active)\s+(?:jira\s+)?(?:issues|tickets)': ['jira_get_issues_by_user'],
-            r'(?:show|get|fetch)\s+(?:my\s+)?jira\s+(?:issues|tickets)': ['jira_get_issues_by_user'],
-            r'(?:show|get|fetch)\s+(?:my\s+)?(?:github\s+)?(?:repos|repositories)': ['github_list_repositories'],
-            r'(?:find|search)\s+(?:for\s+)?code\s+(?:that\s+)?(?:contains|has|with)': ['greptile_search_code', 'github_search_code'],
-            r'(?:search|look up|find)\s+(?:information|details)\s+(?:about|on)\s+(.+)': ['perplexity_web_search'],
-            r'(?:what is|tell me about|who is|when did|where is)\s+(.+)': ['perplexity_web_search'],
-            r'(?:summarize|explain)\s+(?:the\s+)?(?:repo|repository|codebase)': ['greptile_summarize_repo'],
-            r'(?:create|open|make|start)\s+(?:a\s+)?(?:new\s+)?(?:jira\s+)?(?:ticket|issue|story)': ['start_story_builder_workflow'],
-            r'(?:build|draft)\s+(?:a\s+)?(?:new\s+)?(?:jira\s+)?(?:ticket|issue|story)': ['start_story_builder_workflow']
-        }
+        # Jira ticket requests  
+        if ('jira' in query_lower or 'tickets' in query_lower or 'issues' in query_lower) and \
+           ('my' in query_lower):
+            if 'jira_get_issues_by_user' in tool_dict:
+                direct_tools.append('jira_get_issues_by_user')
         
-        for pattern, tools in intent_patterns.items():
-            if re.search(pattern, query_lower):
-                for tool in tools:
-                    if tool in tool_dict and tool not in direct_tools:
-                        direct_tools.append(tool)
+        # Code search requests
+        if 'search' in query_lower and 'code' in query_lower:
+            for tool in ['greptile_search_code', 'github_search_code']:
+                if tool in tool_dict and tool not in direct_tools:
+                    direct_tools.append(tool)
+        
+        # Web search requests
+        if any(phrase in query_lower for phrase in ['what is', 'tell me about', 'search for']):
+            if 'perplexity_web_search' in tool_dict:
+                direct_tools.append('perplexity_web_search')
         
         return direct_tools
     

@@ -208,20 +208,48 @@ async def start_streaming_response(
 
         # Check if this is a help command
         is_help_command = False
+        latest_user_message = ""
         if app_state.messages and app_state.messages[-1].get("role") == "user":
-            last_message = app_state.messages[-1].get("content", "").lower()
-            help_patterns = [
-                "@bot help",
-                "@bot what can you do",
-                "@bot commands",
-                "help me",
-                "what can you do",
-                "how do you work",
-                "show me your commands",
-                "list your features",
-                "what are your capabilities"
-            ]
-            is_help_command = any(pattern in last_message for pattern in help_patterns)
+            latest_user_message = app_state.messages[-1].get("content", "").lower()
+            help_keywords = ["help", "what can you do", "show commands", "available tools"]
+            is_help_command = any(keyword in latest_user_message for keyword in help_keywords)
+
+        # Check for multi-tool workflow patterns
+        from .workflow_orchestrator import detect_workflow_intent, WorkflowOrchestrator
+        workflow_intent = detect_workflow_intent(latest_user_message) if latest_user_message else None
+        
+        if workflow_intent:
+            log.info(f"Detected multi-tool workflow: {workflow_intent}", extra={"event_type": "workflow_intent_detected"})
+            yield {'type': 'status', 'content': f"🔄 Orchestrating {workflow_intent} workflow..."}
+            
+            try:
+                orchestrator = WorkflowOrchestrator(tool_executor, config)
+                workflow_result = await orchestrator.execute_workflow(
+                    workflow_intent, 
+                    app_state
+                )
+                
+                if workflow_result.success:
+                    # Add the synthesized result as an assistant message
+                    app_state.add_message("assistant", workflow_result.final_synthesis)
+                    app_state.last_interaction_status = "COMPLETED_OK"
+                    
+                    yield {'type': 'text_chunk', 'content': workflow_result.final_synthesis}
+                    yield {'type': 'completed', 'content': 'Workflow completed successfully'}
+                    
+                    log.info(f"Workflow {workflow_intent} completed successfully in {workflow_result.execution_time_ms}ms")
+                    return
+                else:
+                    log.warning(f"Workflow {workflow_intent} failed: {workflow_result.final_synthesis}")
+                    yield {'type': 'error', 'content': f"Workflow failed: {workflow_result.final_synthesis}"}
+                    
+            except Exception as e:
+                log.error(f"Workflow orchestration failed: {e}", exc_info=True)
+                yield {'type': 'error', 'content': f"Failed to execute workflow: {str(e)}"}
+                app_state.last_interaction_status = "ERROR"
+                return
+
+        # Continue with existing workflow logic...
 
         # FIXED: Always provide ALL available tools to the LLM
         # For help commands, the LLM needs to see all tools to describe them to the user

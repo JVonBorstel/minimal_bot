@@ -736,7 +736,7 @@ def _detect_circular_calls(
     args_str: str,
     previous_calls: List[Tuple[str, str, str]]  # List of (name, args, hash)
 ) -> Tuple[bool, Optional[str]]:
-    """Detects exact duplicate or highly similar repeated tool calls."""
+    """Detects exact duplicate or highly similar repeated tool calls, but allows retries after failures."""
     if not isinstance(args_str, str):
         log.warning(
             "Attempted to detect circular call with non-string args_str. Treating as non-circular.",
@@ -745,15 +745,37 @@ def _detect_circular_calls(
         return False, None
 
     current_hash = _compute_tool_call_hash(function_name, args_str)
-    hash_matches = [(prev_name, i) for i, (prev_name, _, prev_hash)
-                    in enumerate(previous_calls)
-                    if prev_hash == current_hash]
+    
+    # Count consecutive failures for the same tool call
+    consecutive_failures = 0
+    hash_matches = []
+    
+    # Look through previous calls in reverse order (most recent first)
+    for i in range(len(previous_calls) - 1, -1, -1):
+        prev_name, prev_args, prev_hash = previous_calls[i]
+        
+        if prev_hash == current_hash and prev_name == function_name:
+            hash_matches.append((prev_name, i))
+            consecutive_failures += 1
+        else:
+            # If we hit a different call, stop counting consecutive failures
+            break
+    
     if hash_matches:
-        prev_name, idx = hash_matches[0]
-        return True, (
-            f"Duplicate tool call detected: '{function_name}' matches "
-            f"previous call #{idx+1} to '{prev_name}'"
-        )
+        # Allow up to 2 retries for the same exact call (total of 3 attempts)
+        MAX_RETRIES = 2
+        if consecutive_failures <= MAX_RETRIES:
+            log.info(
+                f"Allowing retry #{consecutive_failures + 1} for tool '{function_name}' after previous failures",
+                extra={"event_type": "retry_allowed", "details": {"function_name": function_name, "retry_number": consecutive_failures + 1}}
+            )
+            return False, None
+        else:
+            prev_name, idx = hash_matches[0]
+            return True, (
+                f"Excessive retries detected: '{function_name}' attempted {consecutive_failures + 1} times "
+                f"with identical arguments (exceeds max retries of {MAX_RETRIES + 1})"
+            )
 
     similar_calls = [(i, prev_args) for i, (prev_name, prev_args, _)
                      in enumerate(previous_calls)

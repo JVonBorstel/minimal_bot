@@ -474,4 +474,128 @@ def preload_user_profiles(user_ids: List[str], db_path: Optional[str] = None) ->
 
 # It's crucial to initialize the database table at application startup.
 # This can be done by calling db_manager.create_user_profiles_table_if_not_exists()
-# from your main application entry point (e.g., app.py or where Config is first loaded). 
+# from your main application entry point (e.g., app.py or where Config is first loaded).
+
+def ensure_admin_user_exists() -> bool:
+    """
+    Ensures that an admin user exists in the database based on environment variables.
+    
+    Creates an admin user if:
+    1. ADMIN_USER_ID is set in environment variables
+    2. The user doesn't already exist in the database
+    
+    Returns:
+        True if admin user exists or was created successfully, False otherwise
+    """
+    from config import get_config
+    from .models import UserProfile
+    
+    try:
+        config = get_config()
+        
+        # Check if admin user environment variables are configured
+        admin_user_id = config.ADMIN_USER_ID
+        admin_user_name = config.ADMIN_USER_NAME or "System Administrator"
+        admin_user_email = config.ADMIN_USER_EMAIL
+        
+        if not admin_user_id:
+            logger.info("No ADMIN_USER_ID configured in environment variables. Skipping admin user creation.")
+            return True  # Not an error, just not configured
+        
+        # Check if admin user already exists
+        existing_admin = db_manager.get_user_profile_by_id(admin_user_id)
+        if existing_admin:
+            # User exists, ensure they have admin role
+            if existing_admin.get('assigned_role') != 'ADMIN':
+                logger.info(f"Upgrading existing user {admin_user_id} to ADMIN role")
+                existing_admin['assigned_role'] = 'ADMIN'
+                existing_admin['last_active_timestamp'] = int(time.time())
+                if db_manager.save_user_profile(existing_admin):
+                    logger.info(f"Successfully upgraded user {admin_user_id} to ADMIN role")
+                    return True
+                else:
+                    logger.error(f"Failed to upgrade user {admin_user_id} to ADMIN role")
+                    return False
+            else:
+                logger.info(f"Admin user {admin_user_id} already exists with ADMIN role")
+                return True
+        
+        # Create new admin user
+        logger.info(f"Creating new admin user: {admin_user_id}")
+        
+        current_timestamp = int(time.time())
+        admin_profile_data = {
+            'user_id': admin_user_id,
+            'display_name': admin_user_name,
+            'email': admin_user_email,
+            'assigned_role': 'ADMIN',
+            'first_seen_timestamp': current_timestamp,
+            'last_active_timestamp': current_timestamp,
+            'profile_data': {
+                'created_by': 'system',
+                'admin_setup': True,
+                'onboarding_completed': True
+            },
+            'profile_version': 1
+        }
+        
+        if db_manager.save_user_profile(admin_profile_data):
+            logger.info(f"✅ Successfully created admin user: {admin_user_id} ({admin_user_name})")
+            return True
+        else:
+            logger.error(f"❌ Failed to create admin user: {admin_user_id}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error ensuring admin user exists: {e}", exc_info=True)
+        return False
+
+def promote_user_to_admin_by_email(email: str) -> bool:
+    """
+    Promotes a user to admin based on their email address.
+    Useful for when the Bot Framework user ID doesn't match the configured admin ID.
+    
+    Args:
+        email: Email address of the user to promote
+        
+    Returns:
+        True if user was found and promoted, False otherwise
+    """
+    try:
+        # Get all users and find by email
+        all_users = db_manager.get_all_user_profiles()
+        
+        for user_data in all_users:
+            if user_data.get('email') == email:
+                user_data['assigned_role'] = 'ADMIN'
+                user_data['last_active_timestamp'] = int(time.time())
+                
+                # Update profile_data to mark as admin
+                profile_data = user_data.get('profile_data', {})
+                if isinstance(profile_data, str):
+                    import json
+                    try:
+                        profile_data = json.loads(profile_data)
+                    except:
+                        profile_data = {}
+                
+                profile_data.update({
+                    'promoted_to_admin': True,
+                    'promotion_timestamp': int(time.time()),
+                    'onboarding_completed': True
+                })
+                user_data['profile_data'] = profile_data
+                
+                if db_manager.save_user_profile(user_data):
+                    logger.info(f"✅ Successfully promoted user {email} (ID: {user_data['user_id']}) to ADMIN")
+                    return True
+                else:
+                    logger.error(f"❌ Failed to save promotion for user {email}")
+                    return False
+        
+        logger.warning(f"❌ No user found with email: {email}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error promoting user by email {email}: {e}", exc_info=True)
+        return False 

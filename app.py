@@ -319,6 +319,17 @@ except Exception as e:
     logger.critical(f"Failed to initialize MyBot: {e}", exc_info=True)
     sys.exit(1)
 
+# --- Admin User Setup ---
+try:
+    from user_auth.utils import ensure_admin_user_exists
+    if ensure_admin_user_exists():
+        logger.info("Admin user setup completed successfully.")
+    else:
+        logger.warning("Admin user setup failed, but continuing with startup.")
+except Exception as e:
+    logger.error(f"Error during admin user setup: {e}", exc_info=True)
+    logger.warning("Continuing with startup despite admin user setup error.")
+
 
 # --- Cleanup function for bot resources ---
 async def on_bot_shutdown(app: web.Application):

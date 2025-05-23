@@ -265,7 +265,7 @@ class ToolCallAdapter:
         request_for_executor = ToolCallRequest(
             tool_name=selected_tool,
             parameters=transformed_params,
-            call_id=original_call_id
+            tool_call_id=original_call_id
         )
         
         tool_result = await self.tool_executor.execute_tool(
