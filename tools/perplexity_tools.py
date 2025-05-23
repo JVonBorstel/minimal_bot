@@ -68,7 +68,11 @@ class PerplexityTools:
         if not self.api_key:
             raise ValueError("Perplexity API key is missing.")
 
-        url = f"{self.api_url}/{endpoint.lstrip('/')}"
+        # Fix URL construction to avoid double slashes
+        base_url = self.api_url.rstrip('/')
+        endpoint_clean = endpoint.lstrip('/')
+        url = f"{base_url}/{endpoint_clean}"
+        
         log.debug(f"Sending {method} request to Perplexity: {url}")
         log.debug(
             f"Perplexity request data keys: {list(data.keys()) if data else 'None'}")

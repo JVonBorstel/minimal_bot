@@ -249,15 +249,17 @@ class GreptileTools:
         
         return owner, repo
 
-    def _create_repo_object(self, repo_url: str, context: Optional[str] = None) -> Dict[str, Any]:
+    def _create_repo_object(self, repo_url: str, context: Optional[str] = None, branch: str = "main") -> Dict[str, Any]:
         """
         Creates a repository object for API requests.
+        The Greptile API requires a "branch" field in the repository object.
         """
         try:
             owner, repo = self._extract_owner_repo(repo_url)
             repo_obj = {
                 "remote": "github",
-                "repository": f"{owner}/{repo}"
+                "repository": f"{owner}/{repo}",
+                "branch": branch  # Required by Greptile API
             }
             
             if context:
@@ -365,82 +367,23 @@ class GreptileTools:
     ) -> Dict[str, Any]:
         """
         Performs semantic search for code snippets related to a query.
-        Can search within a specific GitHub repository or across Greptile's public index if no repository is specified.
+        NOTE: Search endpoint is not available in Greptile API v2.
         """
-        if not query:
-            return {"status": "ERROR", "error": "Query is required"}
-            
-        # If github_repo_url is provided, sanitize it
-        repository = None
-        if github_repo_url:
-            repository = self._sanitize_github_url(github_repo_url)
+        log.warning("Greptile search_code called, but search endpoint is not available in API v2")
         
-        # Build the query parameters
-        params = {"query": query}
-        
-        if repository:
-            params["repository"] = repository
-        if limit is not None:
-            params["count"] = limit  # type: ignore[assignment]
-        if language:
-            params["language"] = language
-        if max_tokens is not None:
-            params["max_tokens"] = max_tokens  # type: ignore[assignment]
-        if score_threshold is not None:
-            params["score_threshold"] = score_threshold  # type: ignore[assignment]
-        if path_prefix:
-            params["path_prefix"] = path_prefix
-        if file_name_contains:
-            params["file_name_contains"] = file_name_contains
-        
-        try:
-            log.info(f"Searching code in Greptile with query: {query}")
-            response = self._send_request(endpoint="search", method="GET", params=params)
-            
-            # Check for expected response structure
-            results = response.get("results") or response.get("data") or []
-            if not isinstance(results, list):
-                log.warning(f"Unexpected response format from Greptile search: {response}")
-                results = []
-                
-            formatted_results = []
-            for result in results:
-                formatted_result = {
-                    "snippet": result.get("code") or result.get("snippet", ""),
-                    "filepath": result.get("filepath", ""),
-                    "score": result.get("score", 0.0),
-                    "repository": result.get("repository", repository)
-                }
-                
-                # Optional fields
-                if "language" in result:
-                    formatted_result["language"] = result["language"]
-                if "start_line" in result:
-                    formatted_result["start_line"] = result["start_line"]
-                if "end_line" in result:
-                    formatted_result["end_line"] = result["end_line"]
-                    
-                formatted_results.append(formatted_result)
-                
-            log.info(f"Retrieved {len(formatted_results)} search results from Greptile")
-            return {
-                "status": "SUCCESS",
-                "results": formatted_results,
-                "query": query
-            }
-        except Exception as e:
-            log.error(f"Error during Greptile code search: {str(e)}")
-            return {
-                "status": "ERROR",
-                "error": str(e),
-                "query": query
-            }
+        # Return a helpful error message explaining the limitation
+        return {
+            "status": "ERROR",
+            "error": "Search endpoint is not available in Greptile API v2. Use greptile_query_codebase instead for code analysis.",
+            "query": query,
+            "suggestion": "Try using greptile_query_codebase with a natural language query about the code you're looking for."
+        }
 
     @tool(
         name="greptile_summarize_repo",
         description="Provides a high-level overview of a Greptile-indexed repository's architecture, key modules, and entrypoints using an AI query. Requires repository URL.",
     )
-    async def summarize_repo(self, repo_url: str) -> Dict[str, Any]:
+    def summarize_repo(self, repo_url: str) -> Dict[str, Any]:
         """
         Provides a high-level overview of a repository's architecture, key modules, and entrypoints.
         """
@@ -491,26 +434,34 @@ class GreptileTools:
             return {"status": "NOT_CONFIGURED", "message": "Greptile API key not configured."}
 
         try:
-            # Try a simple request to check connectivity and auth
-            response = self._send_request(endpoint="health", method="GET", include_headers=True)
+            # The health endpoint returns plain text "Healthy!" not JSON, so we need to handle this specially
+            api_url = self.api_url.rstrip("/")
+            url = f"{api_url}/health"
             
-            headers = response.get("headers", {})
-            rate_limit_remaining = headers.get("X-RateLimit-Remaining", "Unknown")
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            if self.github_token:
+                headers["X-GitHub-Token"] = self.github_token
             
-            log.info("Greptile health check successful.")
-            return {
-                "status": "OK", 
-                "message": f"Successfully connected to Greptile API. Rate limit remaining: {rate_limit_remaining}",
-                "api_url": self.api_url
-            }
-        except RuntimeError as e:
-            error_message = f"Greptile API error during health check: {str(e)}"
-            if "401" in str(e):
-                error_message = "Greptile authentication failed. Check API key."
-            elif "403" in str(e):
-                error_message = "Greptile access forbidden. Check API key permissions."
-            log.error(error_message, exc_info=False)
-            return {"status": "ERROR", "message": error_message}
+            response = self.session.get(url, headers=headers, timeout=self.timeout)
+            
+            log.info(f"Greptile health check response: Status={response.status_code}, Text='{response.text}'")
+            
+            if response.status_code == 200:
+                # Greptile health endpoint returns plain text "Healthy!"
+                rate_limit_remaining = response.headers.get("X-RateLimit-Remaining", "Unknown")
+                
+                log.info("Greptile health check successful.")
+                return {
+                    "status": "OK", 
+                    "message": f"Successfully connected to Greptile API. Response: {response.text.strip()}. Rate limit remaining: {rate_limit_remaining}",
+                    "api_url": self.api_url
+                }
+            else:
+                error_message = f"Greptile health check failed with status {response.status_code}: {response.text}"
+                log.error(error_message)
+                return {"status": "ERROR", "message": error_message}
+                
         except Exception as e:
-            log.error(f"Greptile health check failed: Unexpected error - {e}", exc_info=True)
-            return {"status": "ERROR", "message": f"Unexpected error during Greptile health check: {str(e)}"}
+            error_message = f"Greptile health check failed: {str(e)}"
+            log.error(error_message, exc_info=True)
+            return {"status": "ERROR", "message": error_message}
