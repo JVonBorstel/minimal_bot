@@ -85,6 +85,15 @@ class WorkflowOrchestrator:
                 )
             ],
             
+            "detailed_jira_tickets": [
+                WorkflowStep(
+                    step_id="get_detailed_jira_tickets",
+                    tool_name="jira_get_issues_by_user",
+                    parameters={"user_email": "{user_email}", "max_results": 25},
+                    description="Get detailed user's Jira tickets"
+                )
+            ],
+            
             "code_ticket_analysis": [
                 WorkflowStep(
                     step_id="get_ticket_details",
@@ -104,6 +113,24 @@ class WorkflowOrchestrator:
                     tool_name="github_search_commits",
                     parameters={"query": "{ticket_id}"},
                     description="Find commits referencing the ticket"
+                )
+            ],
+            
+            "search_code": [
+                WorkflowStep(
+                    step_id="search_codebase",
+                    tool_name="greptile_search_code",
+                    parameters={"query": "{search_query}"},
+                    description="Search codebase for specific code or functions"
+                )
+            ],
+            
+            "web_search": [
+                WorkflowStep(
+                    step_id="web_search",
+                    tool_name="perplexity_web_search", 
+                    parameters={"query": "{search_query}"},
+                    description="Search the web for information"
                 )
             ]
         }
@@ -240,6 +267,20 @@ class WorkflowOrchestrator:
                     else:
                         log.warning(f"Could not resolve user_email - no user email or JIRA_API_EMAIL configured")
                         injected[key] = value  # Keep original template
+                elif ref == "search_query":
+                    # Extract search query from the user's latest message
+                    search_query = "general search"  # default
+                    if app_state.messages and app_state.messages[-1].get("role") == "user":
+                        user_message = app_state.messages[-1].get("content", "")
+                        # Remove common command words to extract the actual search terms
+                        search_words = ["search", "find", "look for", "locate", "grep", "google", "what is", "who is", "tell me about"]
+                        search_query = user_message.lower()
+                        for word in search_words:
+                            search_query = search_query.replace(word, "").strip()
+                        search_query = search_query or user_message  # fallback to full message
+                    
+                    injected[key] = search_query
+                    log.info(f"Injected search_query: {search_query}")
                 elif "." in ref:
                     # Reference to previous step result
                     step_id, field = ref.split(".", 1)
@@ -283,8 +324,14 @@ class WorkflowOrchestrator:
             return self._synthesize_github_repos(results)
         elif workflow_type == "list_jira_tickets":
             return self._synthesize_jira_tickets(results)
+        elif workflow_type == "detailed_jira_tickets":
+            return self._synthesize_detailed_jira_tickets(results)
         elif workflow_type == "code_ticket_analysis":
             return self._synthesize_code_ticket_analysis(results)
+        elif workflow_type == "search_code":
+            return self._synthesize_search_code(results)
+        elif workflow_type == "web_search":
+            return self._synthesize_web_search(results)
         else:
             # Generic synthesis
             return self._generic_synthesis(results)
@@ -393,6 +440,65 @@ class WorkflowOrchestrator:
         
         return "\n".join(synthesis)
     
+    def _synthesize_detailed_jira_tickets(self, results: Dict[str, Any]) -> str:
+        """Synthesize detailed Jira tickets information."""
+        ticket_result = results.get("get_detailed_jira_tickets", {}).get("result", {})
+        
+        if not ticket_result:
+            return "❌ Could not retrieve detailed Jira ticket data."
+        
+        # Extract meaningful data
+        tickets = ticket_result.get("data", []) if isinstance(ticket_result, dict) else ticket_result
+        
+        if not tickets:
+            return "🎫 No detailed Jira tickets found."
+        
+        synthesis = []
+        synthesis.append("🎫 **Detailed Jira Tickets Information**")
+        
+        for i, ticket in enumerate(tickets, 1):
+            if isinstance(ticket, dict):
+                key = ticket.get("key", "Unknown")
+                summary = ticket.get("summary", "No summary")
+                status = ticket.get("status", "Unknown")
+                description = ticket.get("description", "No description")
+                synthesis.append(f"{i}. **{key}** - {summary} ({status})")
+                synthesis.append(f"  📋 Description: {description}")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_search_code(self, results: Dict[str, Any]) -> str:
+        """Synthesize search code results."""
+        code_result = results.get("search_codebase", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("💻 **Code Search Results**")
+        
+        if code_result:
+            # Handle the actual search result format from Greptile
+            if isinstance(code_result, dict) and "data" in code_result:
+                code_data = code_result["data"]
+                synthesis.append(f"🔍 Found {len(code_data) if isinstance(code_data, list) else 1} code references")
+            else:
+                synthesis.append("🔍 Search completed")
+        else:
+            synthesis.append("❌ No code search results found")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_web_search(self, results: Dict[str, Any]) -> str:
+        """Synthesize web search results."""
+        search_result = results.get("web_search", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("🌐 **Web Search Results**")
+        
+        if search_result:
+            search_data = search_result.get("data", []) if isinstance(search_result, dict) else search_result
+            synthesis.append(f"🔍 Found {len(search_data) if isinstance(search_data, list) else 0} search results")
+        
+        return "\n".join(synthesis)
+    
     def _generic_synthesis(self, results: Dict[str, Any]) -> str:
         """Generic synthesis for unknown workflow types."""
         successful_steps = [
@@ -418,19 +524,45 @@ WORKFLOW_PATTERNS = {
         "compare", "repos", "repositories", "github", "jira", "tickets",
         "repo against jira", "github vs jira", "github with jira",
         "match repositories to tickets", "repo ticket correlation",
-        "repos with", "repositories with"
+        "repos with", "repositories with", "cross reference", "correlation"
     ],
     "code_ticket_analysis": [
         "find code for ticket", "code related to", "ticket implementation",
-        "where is ticket", "code for PROJ-"
+        "where is ticket", "code for PROJ-", "find implementation",
+        "locate code", "ticket code", "code changes"
     ],
     "list_github_repos": [
         "list repos", "show repos", "my repos", "repositories", "github repos",
-        "repo names", "repository names", "all repos"
+        "repo names", "repository names", "all repos", "github repositories",
+        "what repos", "which repos", "my github", "github projects",
+        "projects", "my projects", "code repositories", "my code",
+        "repositories I have", "repos I own", "my github repos",
+        "show me repos", "show repositories", "display repos"
     ],
     "list_jira_tickets": [
         "list tickets", "show tickets", "my tickets", "jira tickets", 
-        "ticket names", "issue names", "my issues"
+        "ticket names", "issue names", "my issues", "jira issues",
+        "what tickets", "which tickets", "assigned tickets", "my assignments",
+        "tasks", "my tasks", "work items", "todo", "to do",
+        "show me tickets", "display tickets", "current tickets",
+        "open tickets", "active tickets", "pending tickets"
+    ],
+    "detailed_jira_tickets": [
+        "dive deeper", "more details", "detailed view", "ticket details",
+        "deeper into tickets", "more info", "expand tickets", "full details",
+        "detail view", "complete info", "elaborate", "explain tickets",
+        "break down", "specifics", "in depth", "comprehensive",
+        "detailed information", "expand on", "tell me more"
+    ],
+    "search_code": [
+        "search code", "find in code", "code search", "look for",
+        "search for", "find function", "locate", "where is",
+        "grep", "search repository", "code lookup"
+    ],
+    "web_search": [
+        "search web", "google", "look up", "find information",
+        "research", "what is", "who is", "when did", "how to",
+        "search for", "find out", "tell me about"
     ]
 }
 
@@ -451,18 +583,43 @@ def detect_workflow_intent(user_query: str) -> Optional[str]:
         log.info(f"Detected workflow intent: repo_jira_comparison from query: {user_query}")
         return "repo_jira_comparison"
     
-    # Simple single-tool requests
-    if any(pattern in query_lower for pattern in WORKFLOW_PATTERNS["list_github_repos"]):
-        log.info(f"Detected workflow intent: list_github_repos from query: {user_query}")
-        return "list_github_repos"
-        
-    if any(pattern in query_lower for pattern in WORKFLOW_PATTERNS["list_jira_tickets"]):
-        log.info(f"Detected workflow intent: list_jira_tickets from query: {user_query}")
-        return "list_jira_tickets"
+    # ULTRA-GENERAL DETECTION - catch ANY data request
     
-    # Check other patterns
+    # GitHub repository requests
+    github_keywords = ["repo", "repositories", "github", "projects", "code"]
+    if any(keyword in query_lower for keyword in github_keywords):
+        if any(word in query_lower for word in ["list", "show", "my", "what", "which", "display", "get"]):
+            log.info(f"Detected workflow intent: list_github_repos from query: {user_query}")
+            return "list_github_repos"
+    
+    # Jira ticket requests  
+    jira_keywords = ["ticket", "tickets", "jira", "issue", "issues", "task", "tasks", "todo", "assigned"]
+    if any(keyword in query_lower for keyword in jira_keywords):
+        if "detail" in query_lower or "deeper" in query_lower or "more" in query_lower or "expand" in query_lower:
+            log.info(f"Detected workflow intent: detailed_jira_tickets from query: {user_query}")
+            return "detailed_jira_tickets"
+        elif any(word in query_lower for word in ["list", "show", "my", "what", "which", "display", "get"]):
+            log.info(f"Detected workflow intent: list_jira_tickets from query: {user_query}")
+            return "list_jira_tickets"
+    
+    # Code search requests
+    code_search_keywords = ["search", "find", "locate", "grep", "where", "look"]
+    code_targets = ["code", "function", "class", "file", "implementation"]
+    if any(search in query_lower for search in code_search_keywords) and any(target in query_lower for target in code_targets):
+        log.info(f"Detected workflow intent: search_code from query: {user_query}")
+        return "search_code"
+    
+    # Web search requests
+    web_search_keywords = ["what is", "who is", "when", "how", "why", "google", "search", "find information", "look up", "research"]
+    if any(keyword in query_lower for keyword in web_search_keywords):
+        # Don't trigger for code-related searches
+        if not any(target in query_lower for target in code_targets + github_keywords):
+            log.info(f"Detected workflow intent: web_search from query: {user_query}")
+            return "web_search"
+    
+    # Fallback: check original specific patterns
     for workflow_type, patterns in WORKFLOW_PATTERNS.items():
-        if workflow_type in ["repo_jira_comparison", "list_github_repos", "list_jira_tickets"]:
+        if workflow_type in ["repo_jira_comparison", "list_github_repos", "list_jira_tickets", "detailed_jira_tickets", "search_code", "web_search"]:
             continue  # Already handled above
             
         if any(pattern in query_lower for pattern in patterns):

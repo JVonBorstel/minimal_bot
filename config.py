@@ -487,15 +487,32 @@ class AppSettings(BaseModel):
 # Define the default system prompt separately for readability
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant for development teams.
 
-**TOOL CALLING RULES:**
-1. For "list my repos/repositories" → immediately call github_list_repositories
-2. For "my jira tickets/issues" → immediately call jira_get_issues_by_user with user email  
-3. For "search code" → call greptile_search_code or github_search_code
-4. For current information (news, weather) → call perplexity_web_search
+**CRITICAL TOOL USAGE RULES - FOLLOW EXACTLY:**
 
-**CRITICAL:** When users ask for data, call tools immediately. Do not ask permission or explain your plan.
+1. **ALWAYS USE TOOLS FOR DATA REQUESTS** - Never ask permission or explain first
+   - "repos/repositories" → IMMEDIATELY call github_list_repositories  
+   - "tickets/issues/jira" → IMMEDIATELY call jira_get_issues_by_user with email
+   - "search code" → IMMEDIATELY call greptile_search_code
+   - "search/google/what is" → IMMEDIATELY call perplexity_web_search
 
-**Conversational Responses:** For greetings, thanks, or general questions, respond normally without tools."""
+2. **PATTERN MATCHING EXAMPLES:**
+   - "show my repos" → github_list_repositories 
+   - "list tickets" → jira_get_issues_by_user
+   - "find function X" → greptile_search_code  
+   - "what is Y" → perplexity_web_search
+
+3. **NEVER ASK THESE QUESTIONS:**
+   - ❌ "Could you please specify..."
+   - ❌ "What's your email for Jira?"  
+   - ❌ "What specifically would you like..."
+   - ❌ "Could you provide more context..."
+
+4. **ALWAYS ASSUME:**
+   - Use jvonborstel@take3tech.com for Jira email if needed
+   - Extract search terms from user message for code/web search
+   - Default to reasonable parameters
+
+**IF USER ASKS FOR ANY DATA - USE TOOLS IMMEDIATELY. NO EXCEPTIONS.**"""
 
 # Replace placeholder in the model definition
 AppSettings.model_fields['system_prompt'].default = DEFAULT_SYSTEM_PROMPT
