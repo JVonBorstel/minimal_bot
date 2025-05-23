@@ -1,0 +1,70 @@
+{
+  "name": "Minimal ChatOps Bot",
+  "description": "A production-ready minimal chatbot with onboarding, tool integration, and Microsoft Bot Framework support",
+  "keywords": ["python", "bot", "chatops", "microsoft-bot-framework", "teams"],
+  "website": "https://github.com/yourusername/minimal_bot",
+  "repository": "https://github.com/yourusername/minimal_bot",
+  "logo": "https://github.com/yourusername/minimal_bot/raw/main/logo.png",
+  "success_url": "/healthz",
+  "stack": "container",
+  "env": {
+    "MICROSOFT_APP_ID": {
+      "description": "Microsoft Bot Framework App ID",
+      "required": true
+    },
+    "MICROSOFT_APP_PASSWORD": {
+      "description": "Microsoft Bot Framework App Password",
+      "required": true
+    },
+    "GEMINI_API_KEY": {
+      "description": "Google Gemini API Key for LLM functionality",
+      "required": true
+    },
+    "PERPLEXITY_API_KEY": {
+      "description": "Perplexity API Key for web search",
+      "required": false
+    },
+    "GITHUB_TOKEN": {
+      "description": "GitHub Personal Access Token for repository access",
+      "required": false
+    },
+    "JIRA_API_URL": {
+      "description": "Jira API URL (e.g., https://company.atlassian.net)",
+      "required": false
+    },
+    "JIRA_API_EMAIL": {
+      "description": "Jira API Email",
+      "required": false
+    },
+    "JIRA_API_TOKEN": {
+      "description": "Jira API Token",
+      "required": false
+    },
+    "GREPTILE_API_KEY": {
+      "description": "Greptile API Key for code search",
+      "required": false
+    },
+    "GREPTILE_GITHUB_TOKEN": {
+      "description": "GitHub token for Greptile code indexing",
+      "required": false
+    },
+    "PORT": {
+      "description": "Port number for the web server",
+      "value": "3978",
+      "required": true
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level",
+      "value": "INFO",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [],
+  "addons": []
+} 

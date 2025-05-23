@@ -10,6 +10,9 @@ from requests.exceptions import RequestException
 
 from config import Config
 from . import tool
+from user_auth.tool_access import requires_permission
+from user_auth.permissions import Permission
+from state_models import AppState
 
 log = logging.getLogger("tools.jira")
 logging.getLogger('jira').setLevel(logging.INFO)
@@ -18,16 +21,19 @@ class JiraTools:
     """
     Provides tools for interacting with the Jira API using the python-jira library.
     This version is stripped down to essential functionality: getting issues by user and health check.
-    Requires JIRA_API_URL, JIRA_API_EMAIL, and JIRA_API_TOKEN configuration.
+    Supports both shared credentials (from config) and personal user credentials.
     """
     jira_client: Optional[JIRA] = None
+    # Cache for temporary personal clients to avoid recreating them
+    _personal_clients_cache: Dict[str, JIRA] = {}
 
     def __init__(self, config: Config):
-        """Initializes the Jira client."""
+        """Initializes the Jira client with shared credentials from config."""
         self.config = config
         self.jira_url = self.config.get_env_value('JIRA_API_URL')
         self.jira_email = self.config.get_env_value('JIRA_API_EMAIL')
         self.jira_token = self.config.get_env_value('JIRA_API_TOKEN')
+        self._personal_clients_cache = {}
 
         log.debug(f"Jira URL: {'FOUND' if self.jira_url else 'NOT FOUND'}")
         log.debug(f"Jira Email: {'FOUND' if self.jira_email else 'NOT FOUND'}")
@@ -69,20 +75,123 @@ class JiraTools:
             log.error(f"Failed to initialize Jira client (Unexpected Error): {e}", exc_info=True)
             self.jira_client = None
 
-    def _check_jira_client(self):
-        """Checks if the Jira client is initialized, raising ValueError if not."""
-        if not self.jira_client:
-            log.error("Jira client not initialized. Configuration might be missing or incorrect.")
-            raise ValueError("Jira client not initialized. Please check Jira API configuration (URL, Email, Token).")
-
-    def _search_issues_sync(self, jql_query: str, max_results: int, fields_to_retrieve: str) -> List[Dict[str, Any]]:
-        """Synchronous helper method to search Jira issues."""
-        self._check_jira_client()
+    def _get_personal_credentials(self, app_state: AppState) -> Optional[tuple[str, str]]:
+        """
+        Extract personal Jira credentials (email, token) from user profile if available.
         
-        if self.jira_client is None:
-            raise ValueError("Jira client is not initialized.")
+        Args:
+            app_state: Application state containing current user profile
+            
+        Returns:
+            Tuple of (email, token) if found, None otherwise
+        """
+        if not app_state or not hasattr(app_state, 'current_user') or not app_state.current_user:
+            return None
+        
+        user_profile = app_state.current_user
+        profile_data = getattr(user_profile, 'profile_data', None) or {}
+        personal_creds = profile_data.get('personal_credentials', {})
+        
+        jira_email = personal_creds.get('jira_email')
+        jira_token = personal_creds.get('jira_token')
+        
+        if (jira_email and jira_email.strip() and jira_email.lower() not in ['none', 'skip', 'n/a'] and
+            jira_token and jira_token.strip() and jira_token.lower() not in ['none', 'skip', 'n/a']):
+            log.debug(f"Found personal Jira credentials for user {user_profile.user_id}")
+            return (jira_email.strip(), jira_token.strip())
+        
+        return None
 
-        issues_found = self.jira_client.search_issues(
+    def _create_personal_client(self, email: str, token: str) -> Optional[JIRA]:
+        """
+        Create a temporary Jira client for personal credentials.
+        
+        Args:
+            email: Personal Jira email
+            token: Personal Jira API token
+            
+        Returns:
+            JIRA client instance or None if creation failed
+        """
+        # Create a cache key from credentials
+        cache_key = f"{email}:{token[:8]}..."  # Use partial token for security
+        
+        # Check cache first
+        if cache_key in self._personal_clients_cache:
+            log.debug("Using cached personal Jira client")
+            return self._personal_clients_cache[cache_key]
+        
+        try:
+            if not self.jira_url:
+                log.warning("Cannot create personal Jira client: Jira URL not configured")
+                return None
+            
+            timeout_seconds = getattr(self.config, 'DEFAULT_API_TIMEOUT_SECONDS', 10)
+            options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
+            
+            personal_client = JIRA(
+                options=options,
+                basic_auth=(email, token),
+                timeout=timeout_seconds,
+                max_retries=0
+            )
+            
+            # Test the client
+            server_info = personal_client.server_info()
+            log.info(f"Personal Jira client created successfully for user: {email}")
+            
+            # Cache it for future use in this session
+            self._personal_clients_cache[cache_key] = personal_client
+            
+            return personal_client
+            
+        except Exception as e:
+            log.warning(f"Failed to create personal Jira client for {email}: {e}")
+            return None
+
+    def _get_jira_client(self, app_state: AppState) -> Optional[JIRA]:
+        """
+        Get the appropriate Jira client, prioritizing personal credentials over shared ones.
+        
+        Args:
+            app_state: Application state containing current user profile
+            
+        Returns:
+            JIRA client instance or None if no client available
+        """
+        # First, try personal credentials
+        personal_creds = self._get_personal_credentials(app_state)
+        if personal_creds:
+            email, token = personal_creds
+            log.debug("Attempting to use personal Jira credentials")
+            personal_client = self._create_personal_client(email, token)
+            if personal_client:
+                log.info("Using personal Jira client for authenticated user")
+                return personal_client
+            else:
+                log.warning("Personal Jira credentials failed, falling back to shared credentials")
+        
+        # Fall back to shared credentials
+        if self.jira_client:
+            log.debug("Using shared Jira client")
+            return self.jira_client
+        
+        log.warning("No Jira client available (neither personal nor shared)")
+        return None
+
+    def _check_jira_client(self, app_state: AppState):
+        """Checks if a Jira client is available, raising ValueError if not."""
+        client = self._get_jira_client(app_state)
+        if not client:
+            log.error("No Jira client available. Configuration might be missing or incorrect.")
+            raise ValueError("Jira client not available. Please check Jira API configuration or provide personal credentials.")
+        return client
+
+    def _search_issues_sync(self, app_state: AppState, jql_query: str, max_results: int, fields_to_retrieve: str) -> List[Dict[str, Any]]:
+        """Synchronous helper method to search Jira issues."""
+        jira_client = self._check_jira_client(app_state)
+        
+        issues_found = jira_client.search_issues(
             jql_query,
             maxResults=max_results,
             fields=fields_to_retrieve,
@@ -133,12 +242,14 @@ class JiraTools:
               "required": ["user_email"]
           }
     )
-    async def get_issues_by_user(self, user_email: str, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
+    @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def get_issues_by_user(self, app_state: AppState, user_email: str, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
         """
         Finds issues assigned to a user by their email address, optionally filtered by status category.
-        This is a simplified version focusing on user-centric issue retrieval.
+        Now supports personal Jira credentials for enhanced access.
 
         Args:
+            app_state: Application state containing user profile (injected by tool framework)
             user_email: The email address of the user.
             status_category: Optional. Filter by status category: 'to do', 'in progress', 'done'. Defaults to 'to do'.
             max_results: Optional. Maximum number of issues to return. Defaults to 15.
@@ -181,6 +292,7 @@ class JiraTools:
             results = await loop.run_in_executor(
                 None, 
                 self._search_issues_sync,
+                app_state,  # Pass app_state to helper method
                 jql_query,
                 max_results,
                 fields_to_retrieve
@@ -215,58 +327,82 @@ class JiraTools:
             log.error(f"Unexpected error searching issues for user {user_email}: {e}", exc_info=True)
             raise RuntimeError(f"Unexpected error searching issues: {e}")
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self, app_state: Optional[AppState] = None) -> Dict[str, Any]:
         """
         Performs a health check on the Jira API connection and authentication.
         Tries to fetch basic server information.
+        Now supports testing personal credentials if provided.
+
+        Args:
+            app_state: Optional application state for personal credential testing
 
         Returns:
             A dictionary with 'status' ('OK', 'ERROR', 'NOT_CONFIGURED') and 'message'.
         """
-        if not all([self.jira_url, self.jira_email, self.jira_token]):
-            return {"status": "NOT_CONFIGURED", "message": "Jira API URL, Email, or Token not configured."}
-
-        if not self.jira_client:
-            try:
-                log.info(f"(Health Check) Attempting to connect to Jira at {self.jira_url}")
-                options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
-                self.jira_client = JIRA(
-                    options=options,
-                    basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
-                    timeout=5, 
-                    max_retries=0
-                )
-            except (LibraryJIRAError, RequestException, Exception) as e:
-                log.error(f"(Health Check) Jira client re-initialization failed: {e}")
-                self.jira_client = None
-                return {"status": "ERROR", "message": f"Jira client initialization failed during health check: {str(e)}"}
+        # If app_state is provided, try personal credentials first
+        jira_client_to_test = None
+        credential_type = "shared"
         
-        if not self.jira_client:
-             return {"status": "ERROR", "message": "Jira client could not be initialized. Previous errors persist."}
+        if app_state:
+            personal_creds = self._get_personal_credentials(app_state)
+            if personal_creds:
+                email, token = personal_creds
+                personal_client = self._create_personal_client(email, token)
+                if personal_client:
+                    jira_client_to_test = personal_client
+                    credential_type = "personal"
+                    log.debug("Health check using personal Jira credentials")
+        
+        # Fall back to shared credentials if no personal ones or they failed
+        if not jira_client_to_test:
+            if not all([self.jira_url, self.jira_email, self.jira_token]):
+                return {"status": "NOT_CONFIGURED", "message": "Jira API URL, Email, or Token not configured."}
+
+            if not self.jira_client:
+                try:
+                    log.info(f"(Health Check) Attempting to connect to Jira at {self.jira_url}")
+                    options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
+                    self.jira_client = JIRA(
+                        options=options,
+                        basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
+                        timeout=5, 
+                        max_retries=0
+                    )
+                except (LibraryJIRAError, RequestException, Exception) as e:
+                    log.error(f"(Health Check) Jira client re-initialization failed: {e}")
+                    self.jira_client = None
+                    return {"status": "ERROR", "message": f"Jira client initialization failed during health check: {str(e)}"}
+            
+            if not self.jira_client:
+                 return {"status": "ERROR", "message": "Jira client could not be initialized. Previous errors persist."}
+            
+            jira_client_to_test = self.jira_client
+            credential_type = "shared"
 
         try:
             start_time = time.time()
-            server_info = self.jira_client.server_info() # type: ignore[optional-member-access]
+            server_info = jira_client_to_test.server_info() # type: ignore[optional-member-access]
             latency_ms = int((time.time() - start_time) * 1000)
             
+            credential_info = f" (using {credential_type} credentials)"
             rate_limit_info = "Rate limit status not actively checked by this health_check."
 
-            log.info(f"Jira health check successful. Server: {server_info.get('baseUrl', self.jira_url)}, Version: {server_info.get('version', 'N/A')}. Latency: {latency_ms}ms.")
+            log.info(f"Jira health check successful{credential_info}. Server: {server_info.get('baseUrl', self.jira_url)}, Version: {server_info.get('version', 'N/A')}. Latency: {latency_ms}ms.")
             return {
                 "status": "OK", 
-                "message": f"Successfully connected to Jira: {server_info.get('serverTitle', 'N/A')} ({server_info.get('baseUrl', self.jira_url)}). Version: {server_info.get('version', 'N/A')}. Latency: {latency_ms}ms. {rate_limit_info}"
+                "message": f"Successfully connected to Jira: {server_info.get('serverTitle', 'N/A')} ({server_info.get('baseUrl', self.jira_url)}). Version: {server_info.get('version', 'N/A')}. Latency: {latency_ms}ms{credential_info}. {rate_limit_info}"
             }
         except LibraryJIRAError as e:
-            error_message = f"Jira API error during health check: Status={e.status_code}, Text={e.text}"
+            error_message = f"Jira API error during health check{' ('+credential_type+' credentials)' if credential_type else ''}: Status={e.status_code}, Text={e.text}"
             if e.status_code == 401:
-                error_message = "Jira authentication failed (401). Check API token and email."
+                error_message = f"Jira authentication failed (401){' with '+credential_type+' credentials' if credential_type else ''}. Check API token and email."
             elif e.status_code == 403:
-                 error_message = "Jira access forbidden (403). Check user permissions for the API."
+                 error_message = f"Jira access forbidden (403){' with '+credential_type+' credentials' if credential_type else ''}. Check user permissions for the API."
             log.error(error_message, exc_info=False)
             return {"status": "ERROR", "message": error_message}
         except RequestException as e:
-            log.error(f"Jira health check failed: Network error - {e}", exc_info=True)
+            log.error(f"Jira health check failed{' ('+credential_type+' credentials)' if credential_type else ''}: Network error - {e}", exc_info=True)
             return {"status": "ERROR", "message": f"Jira connection error: {str(e)}"}
         except Exception as e:
-            log.error(f"Jira health check failed: Unexpected error - {e}", exc_info=True)
+            log.error(f"Jira health check failed{' ('+credential_type+' credentials)' if credential_type else ''}: Unexpected error - {e}", exc_info=True)
             return {"status": "ERROR", "message": f"Unexpected error during Jira health check: {str(e)}"}

@@ -25,12 +25,14 @@ class GitHubTools:
     """
     Provides tools for interacting with the GitHub API using PyGithub.
     This version is stripped down to list repositories and search code.
-    Supports multiple GitHub accounts and GitHub Enterprise.
+    Supports multiple GitHub accounts, GitHub Enterprise, and personal user credentials.
     """
     github_client: Optional[Github] = None
     authenticated_user_login: Optional[str] = None
     active_account_name: Optional[str] = None
     github_clients: Dict[str, Github] = {}
+    # Cache for temporary personal clients to avoid recreating them
+    _personal_clients_cache: Dict[str, Github] = {}
 
     def __init__(self, config: Config, app_state: Optional[AppState] = None, testing_mode: bool = False):
         log.info("Initializing GitHub Tools")
@@ -40,6 +42,7 @@ class GitHubTools:
         self.authenticated_user_login = None
         self.active_account_name = None
         self.github_clients = {}
+        self._personal_clients_cache = {}
 
         if not hasattr(self.config.settings, 'github_accounts') or not self.config.settings.github_accounts:
             log.warning("No GitHub accounts configured in settings. Add accounts in config.")
@@ -66,6 +69,69 @@ class GitHubTools:
              log.error("No working GitHub clients could be initialized from configuration. Check tokens and network access.")
         elif not self.github_clients:
              log.info("No GitHub clients initialized (no accounts configured or testing mode active without config).")
+
+    def _get_personal_credentials(self, app_state: AppState) -> Optional[str]:
+        """
+        Extract personal GitHub token from user profile if available.
+        
+        Args:
+            app_state: Application state containing current user profile
+            
+        Returns:
+            Personal GitHub token if found, None otherwise
+        """
+        if not app_state or not hasattr(app_state, 'current_user') or not app_state.current_user:
+            return None
+        
+        user_profile = app_state.current_user
+        profile_data = getattr(user_profile, 'profile_data', None) or {}
+        personal_creds = profile_data.get('personal_credentials', {})
+        
+        github_token = personal_creds.get('github_token')
+        if github_token and github_token.strip() and github_token.lower() not in ['none', 'skip', 'n/a']:
+            log.debug(f"Found personal GitHub token for user {user_profile.user_id}")
+            return github_token.strip()
+        
+        return None
+
+    def _create_personal_client(self, token: str) -> Optional[Github]:
+        """
+        Create a temporary GitHub client for personal credentials.
+        
+        Args:
+            token: Personal GitHub token
+            
+        Returns:
+            GitHub client instance or None if creation failed
+        """
+        # Check cache first
+        if token in self._personal_clients_cache:
+            log.debug("Using cached personal GitHub client")
+            return self._personal_clients_cache[token]
+        
+        try:
+            timeout_seconds = getattr(self.config, 'DEFAULT_API_TIMEOUT_SECONDS', 10)
+            
+            # Create client using the same configuration as shared clients
+            # For now, assume personal tokens are for github.com (not enterprise)
+            personal_client = Github(
+                login_or_token=token,
+                timeout=timeout_seconds,
+                retry=3
+            )
+            
+            # Test the client
+            user = personal_client.get_user()
+            log.info(f"Personal GitHub client created successfully for user: {user.login}")
+            
+            # Cache it for future use in this session
+            self._personal_clients_cache[token] = personal_client
+            
+            return personal_client
+            
+        except Exception as e:
+            log.warning(f"Failed to create personal GitHub client: {e}")
+            return None
 
     def _init_single_client(self, token: str, base_url: Optional[str], account_name: str, testing_mode: bool = False) -> bool:
         """
@@ -172,16 +238,32 @@ class GitHubTools:
     def get_account_client(self, app_state: AppState, account_name: Optional[str] = None, **kwargs) -> Optional[Github]:
         """
         Gets a GitHub client for a specific account, or the default active client.
+        Now supports personal credentials from user profiles with fallback to shared credentials.
         """
         if kwargs.get('read_only_mode') is True:
             log.info(f"Executing get_account_client in read-only mode (account: {account_name or 'default active'}).")
 
+        # First, try to get personal credentials from user profile
+        personal_token = self._get_personal_credentials(app_state)
+        if personal_token:
+            log.debug("Attempting to use personal GitHub credentials")
+            personal_client = self._create_personal_client(personal_token)
+            if personal_client:
+                log.info("Using personal GitHub client for authenticated user")
+                return personal_client
+            else:
+                log.warning("Personal GitHub credentials failed, falling back to shared credentials")
+
+        # Fall back to shared credentials
         if account_name:
             if account_name in self.github_clients:
+                log.debug(f"Using shared GitHub client for account: {account_name}")
                 return self.github_clients[account_name]
             else:
                 log.warning(f"Requested GitHub account '{account_name}' not found or not initialized. Using active account if available.")
                 return self.github_client
+        
+        log.debug(f"Using default active GitHub client: {self.active_account_name or 'none'}")
         return self.github_client
 
     async def _get_repo(self, app_state: AppState, owner: str, repo: str, account_name: Optional[str] = None, **kwargs) -> Repository:

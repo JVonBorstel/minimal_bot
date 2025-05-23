@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  minimal-bot:
+    build: .
+    ports:
+      - "3978:3978"
+    environment:
+      # Bot Framework Configuration
+      - MICROSOFT_APP_ID=${MICROSOFT_APP_ID}
+      - MICROSOFT_APP_PASSWORD=${MICROSOFT_APP_PASSWORD}
+      
+      # API Keys (from your .env)
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+      - GREPTILE_API_KEY=${GREPTILE_API_KEY}
+      - GREPTILE_GITHUB_TOKEN=${GREPTILE_GITHUB_TOKEN}
+      
+      # Jira Configuration
+      - JIRA_API_URL=${JIRA_API_URL}
+      - JIRA_API_EMAIL=${JIRA_API_EMAIL}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
+      
+      # GitHub Configuration
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      
+      # Database Configuration
+      - DATABASE_TYPE=sqlite
+      - DATABASE_PATH=/app/data/state.sqlite
+      
+      # Redis Configuration (optional)
+      - REDIS_URL=redis://redis:6379/0
+      
+      # Logging
+      - LOG_LEVEL=INFO
+      
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3978/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data: 

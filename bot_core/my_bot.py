@@ -101,10 +101,20 @@ if not (_root_utils_spec and _root_utils_spec.loader):
 _root_utils_module_obj = _root_utils_spec_loader.module_from_spec(_root_utils_spec)
 _root_utils_spec.loader.exec_module(_root_utils_module_obj)
 
-sanitize_message_content = _root_utils_module_obj.sanitize_message_content
-cleanup_messages = _root_utils_module_obj.cleanup_messages
-optimize_tool_usage_stats = _root_utils_module_obj.optimize_tool_usage_stats
-log_session_summary_adapted = _root_utils_module_obj.log_session_summary_adapted
+# Import the correct sanitize_message_content from utils/utils.py that returns an integer
+try:
+    from utils.utils import sanitize_message_content, log_session_summary_adapted
+    # Import other functions from root utils.py as before
+    cleanup_messages = _root_utils_module_obj.cleanup_messages
+    optimize_tool_usage_stats = _root_utils_module_obj.optimize_tool_usage_stats
+except ImportError as e:
+    logger.warning(f"Could not import from utils.utils, falling back to root utils.py: {e}")
+    # Fallback to root utils.py functions if utils/utils.py is not available
+    sanitize_message_content = _root_utils_module_obj.sanitize_message_content
+    cleanup_messages = _root_utils_module_obj.cleanup_messages
+    optimize_tool_usage_stats = _root_utils_module_obj.optimize_tool_usage_stats
+    log_session_summary_adapted = _root_utils_module_obj.log_session_summary_adapted
+# --- End: Robust import ---
 
 # Import logging utilities using absolute path from the project's utils package
 try:
@@ -122,7 +132,6 @@ except ModuleNotFoundError as e:
         return logging.getLogger(name + "_fallback_bot_core")
     def start_new_turn(): return "fallback_turn_id"
     def clear_turn_ids(): pass
-# --- End: Robust import ---
 
 
 class SQLiteStorage:
@@ -954,6 +963,114 @@ class MyBot(ActivityHandler):
                         }
                     }
                 )
+                
+                # --- NEW: Check for onboarding workflow trigger ---
+                try:
+                    from workflows.onboarding import OnboardingWorkflow, get_active_onboarding_workflow
+                    
+                    # Check if user should start onboarding
+                    should_start_onboarding = OnboardingWorkflow.should_trigger_onboarding(user_profile, app_state)
+                    
+                    if should_start_onboarding:
+                        logger_msg_activity.info(
+                            f"Triggering onboarding workflow for new user {user_profile.user_id}",
+                            extra={"event_type": "onboarding_workflow_triggered"}
+                        )
+                        
+                        # Start onboarding workflow
+                        onboarding = OnboardingWorkflow(user_profile, app_state)
+                        workflow = onboarding.start_workflow()
+                        
+                        # Get first onboarding question
+                        first_question_response = onboarding._format_question_response(
+                            onboarding.ONBOARDING_QUESTIONS[0], 
+                            workflow
+                        )
+                        
+                        # Send the first onboarding question
+                        welcome_message = (
+                            f"🎉 **Welcome to the team, {user_profile.display_name}!**\n\n"
+                            f"I'm Augie, your AI assistant. Let me help you get set up with a quick onboarding process.\n\n"
+                            f"**{first_question_response['progress']}** {first_question_response['message']}"
+                        )
+                        
+                        await turn_context.send_activity(MessageFactory.text(welcome_message))
+                        
+                        # Update user profile and save workflow
+                        from user_auth import db_manager
+                        profile_dict = user_profile.model_dump()
+                        db_manager.save_user_profile(profile_dict)
+                        
+                        logger_msg_activity.info(
+                            f"Started onboarding workflow {workflow.workflow_id} for user {user_profile.user_id}",
+                            extra={"event_type": "onboarding_workflow_started", "workflow_id": workflow.workflow_id}
+                        )
+                        return  # End processing here, wait for user's onboarding response
+                    
+                    # Check if user is currently in onboarding
+                    active_onboarding = get_active_onboarding_workflow(app_state, user_profile.user_id)
+                    if active_onboarding:
+                        logger_msg_activity.info(
+                            f"User {user_profile.user_id} is in active onboarding workflow {active_onboarding.workflow_id}",
+                            extra={"event_type": "active_onboarding_detected", "workflow_id": active_onboarding.workflow_id}
+                        )
+                        
+                        # Process their onboarding response
+                        user_input = activity.text.strip() if activity.text else ""
+                        
+                        onboarding = OnboardingWorkflow(user_profile, app_state)
+                        result = onboarding.process_answer(active_onboarding.workflow_id, user_input)
+                        
+                        if result.get("error"):
+                            await turn_context.send_activity(MessageFactory.text(f"❌ {result['error']}"))
+                            return
+                        
+                        if result.get("retry_question"):
+                            await turn_context.send_activity(MessageFactory.text(f"❌ {result['message']}"))
+                            return
+                        
+                        if result.get("completed"):
+                            # Onboarding completed
+                            await turn_context.send_activity(MessageFactory.text(result["message"]))
+                            
+                            # Update user profile with new data
+                            from user_auth import db_manager
+                            profile_dict = user_profile.model_dump()
+                            db_manager.save_user_profile(profile_dict)
+                            
+                            # Suggest role update if applicable
+                            if result.get("suggested_role"):
+                                admin_message = (
+                                    f"\n\n🔒 **Admin Note**: User {user_profile.display_name} "
+                                    f"completed onboarding and was suggested role **{result['suggested_role']}**. "
+                                    f"Use `@augie assign role {user_profile.email or user_profile.user_id} {result['suggested_role']}` to update."
+                                )
+                                await turn_context.send_activity(MessageFactory.text(admin_message))
+                            
+                            logger_msg_activity.info(
+                                f"Completed onboarding for user {user_profile.user_id}",
+                                extra={"event_type": "onboarding_completed", "suggested_role": result.get("suggested_role")}
+                            )
+                            return  # End processing, onboarding complete
+                        
+                        else:
+                            # Continue with next question
+                            next_message = f"**{result['progress']}** {result['message']}"
+                            await turn_context.send_activity(MessageFactory.text(next_message))
+                            
+                            logger_msg_activity.debug(
+                                f"Sent next onboarding question to user {user_profile.user_id}",
+                                extra={"event_type": "onboarding_question_sent", "progress": result.get("progress")}
+                            )
+                            return  # Wait for next response
+                
+                except Exception as e:
+                    logger_msg_activity.error(
+                        f"Error in onboarding workflow: {e}",
+                        extra={"event_type": "onboarding_error"},
+                        exc_info=True
+                    )
+                    # Continue with normal bot flow if onboarding fails
                 
                 # --- P3A.5.1: Permission-Aware Bot Responses ---
                 # Check if user has minimum required permissions for basic bot interaction

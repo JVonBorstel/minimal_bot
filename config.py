@@ -336,6 +336,11 @@ class AppSettings(BaseModel):
     # Security Settings
     security_rbac_enabled: bool = Field(False, alias="SECURITY_RBAC_ENABLED")
 
+    # Admin User Settings
+    admin_user_id: Optional[str] = Field(None, alias="ADMIN_USER_ID", description="User ID for permanent admin user")
+    admin_user_name: Optional[str] = Field(None, alias="ADMIN_USER_NAME", description="Display name for permanent admin user") 
+    admin_user_email: Optional[EmailStr] = Field(None, alias="ADMIN_USER_EMAIL", description="Email for permanent admin user")
+
     # Storage Settings
     memory_type: Literal["sqlite", "redis"] = Field("sqlite", alias="MEMORY_TYPE")
     # Redis Specific Settings (optional, only used if memory_type is 'redis')
@@ -572,12 +577,18 @@ class Config:
         "enabled": True,                           # Whether to use dynamic tool selection
         "embedding_model": "all-MiniLM-L6-v2",     # SentenceTransformer model to use
         "cache_path": "data/tool_embeddings.json", # Path to store the tool embeddings cache
-        "similarity_threshold": 0.45,              # Minimum similarity score to consider a tool relevant (Increased from 0.3)
-        "max_tools": 6,                           # Maximum number of tools to select for each query
-        "always_include_tools": ["help", "search_web"],  # Tools to always include regardless of relevance
+        "similarity_threshold": 0.20,              # Minimum similarity score to consider a tool relevant (Lowered from 0.25 to be very inclusive)
+        "max_tools": 10,                           # Maximum number of tools to select for each query (Keep high for multi-service scenarios)
+        "always_include_tools": [],               # Tools to always include regardless of relevance
         "debug_logging": True,                    # Enable detailed logging of selection process
-        "default_fallback": False,                 # Fall back to all tools if selection fails (Changed from True to be more conservative)
+        "default_fallback": True,                 # Fall back to all tools if selection fails
         "rebuild_cache_on_startup": False,         # Whether to rebuild the tool embeddings cache on startup
+        "keyword_boosting": True,                 # Enable intelligent keyword-based boosting for multi-service scenarios
+        "multi_service_boost": 0.2,               # Boost score for tools when query suggests multi-service needs (increased)
+        "multi_service_keywords": [               # Keywords that suggest multi-service scenarios
+            "check", "compare", "match", "done", "implemented", "code", "ticket", "issue", 
+            "repository", "repo", "progress", "status", "both", "against", "vs", "and"
+        ],
     }
     
     # Schema Optimization Configuration
@@ -1087,6 +1098,18 @@ class Config:
     @property
     def STATE_DB_PATH(self) -> str:
         return self.settings.state_db_path
+
+    @property 
+    def ADMIN_USER_ID(self) -> Optional[str]:
+        return self.settings.admin_user_id
+    
+    @property
+    def ADMIN_USER_NAME(self) -> Optional[str]:
+        return self.settings.admin_user_name
+    
+    @property  
+    def ADMIN_USER_EMAIL(self) -> Optional[str]:
+        return self.settings.admin_user_email
 
 # --- Initialize and Export Singleton Instance ---
 # This ensures the configuration is loaded and validated once when the module is imported.

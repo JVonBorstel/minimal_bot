@@ -1,0 +1,305 @@
+2025-05-23 04:54:14,600 - config - INFO - Initializing singleton Config instance...
+2025-05-23 04:54:14,608 - config - INFO - Starting Pydantic validation with prepared dictionary...
+2025-05-23 04:54:14,610 - config - WARNING - Port in APP_BASE_URL ('8501') does not match target PORT ('8501'). Overriding APP_BASE_URL port.
+2025-05-23 04:54:14,614 - config - INFO - Pydantic settings loaded and validated successfully.
+2025-05-23 04:54:14,614 - config - INFO - Configuration loaded and validated successfully (config.py).
+2025-05-23 04:54:14,614 - config - INFO - App Environment: development
+2025-05-23 04:54:14,614 - config - INFO - Log Level: DEBUG
+2025-05-23 04:54:14,614 - config - INFO - Default Gemini Model: models/gemini-2.0-flash
+2025-05-23 04:54:14,615 - config - INFO - Available Personas: ['Default', 'Concise Communicator', 'Detailed Explainer', 'Code Reviewer']
+2025-05-23 04:54:14,615 - config - INFO - Default Persona: Default
+2025-05-23 04:54:14,615 - config - INFO - Singleton Config instance created.
+2025-05-23 04:54:14,634 - __main__ - INFO - Test result - SQLite Write Operation: PASS - Successfully wrote 1 items to SQLite
+2025-05-23 04:54:14,635 - __main__ - INFO - Test result - SQLite Read Operation: PASS - Successfully read state with 3 messages
+2025-05-23 04:54:14,635 - __main__ - INFO - Test result - SQLite Data Integrity: PASS - All data matches original
+2025-05-23 04:54:14,637 - __main__ - INFO - Test result - SQLite Update Operation: PASS - Update successful
+2025-05-23 04:54:14,637 - __main__ - INFO - Test result - SQLite File Creation: PASS - Database file created, size: 4096 bytes
+2025-05-23 04:54:14,638 - bot_core.redis_storage - INFO - Initializing Redis client...
+2025-05-23 04:54:14,638 - bot_core.redis_storage - INFO - Connecting to Redis using host: localhost, port: 6379, DB: 1
+2025-05-23 04:54:18,706 - bot_core.redis_storage - ERROR - Redis connection failed: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:18,743 - __main__ - INFO - Test result - Redis Backend Operations: FAIL - Exception: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:18,743 - __main__ - ERROR - Redis backend test failed
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\test_database_backend_switching.py", line 210, in test_redis_backend_operations
+    await self.redis_storage.write(write_data)
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 239, in write
+    await self._ensure_client_initialized()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 127, in _ensure_client_initialized
+    await self._initialize_client()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 171, in _initialize_client
+    raise RedisStorageError(f"Failed to connect to Redis: {e}") from e
+bot_core.redis_storage.RedisStorageError: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:18,746 - bot_core.redis_storage - INFO - Initializing Redis client...
+2025-05-23 04:54:18,746 - bot_core.redis_storage - INFO - Connecting to Redis using host: localhost, port: 6379, DB: 1
+2025-05-23 04:54:22,805 - bot_core.redis_storage - ERROR - Redis connection failed: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:22,808 - __main__ - INFO - Test result - Data Migration SQLite->Redis: FAIL - Exception: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:22,809 - __main__ - ERROR - Data migration test failed
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\test_database_backend_switching.py", line 284, in test_data_migration_sqlite_to_redis
+    await self.redis_storage.write(migration_data)
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 239, in write
+    await self._ensure_client_initialized()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 127, in _ensure_client_initialized
+    await self._initialize_client()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 171, in _initialize_client
+    raise RedisStorageError(f"Failed to connect to Redis: {e}") from e
+bot_core.redis_storage.RedisStorageError: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:22,817 - __main__ - INFO - Test result - SQLite Performance: PASS - Write: 0.003s, Read: 0.002s
+2025-05-23 04:54:22,818 - bot_core.redis_storage - INFO - Initializing Redis client...
+2025-05-23 04:54:22,819 - bot_core.redis_storage - INFO - Connecting to Redis using host: localhost, port: 6379, DB: 1
+2025-05-23 04:54:26,899 - bot_core.redis_storage - ERROR - Redis connection failed: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:26,901 - __main__ - INFO - Test result - Backend Performance Comparison: FAIL - Exception: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+2025-05-23 04:54:26,901 - __main__ - ERROR - Performance comparison failed
+Traceback (most recent call last):
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 302, in connect_check_health
+    await self.retry.call_with_retry(
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\retry.py", line 71, in call_with_retry
+    return await do()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 759, in _connect
+    reader, writer = await asyncio.open_connection(
+  File "C:\Python310\lib\asyncio\streams.py", line 47, in open_connection
+    transport, _ = await loop.create_connection(
+  File "C:\Python310\lib\asyncio\base_events.py", line 1069, in create_connection
+    raise exceptions[0]
+  File "C:\Python310\lib\asyncio\base_events.py", line 1049, in create_connection
+    sock = await self._connect_sock(
+  File "C:\Python310\lib\asyncio\base_events.py", line 960, in _connect_sock
+    await self.sock_connect(sock, address)
+  File "C:\Python310\lib\asyncio\proactor_events.py", line 705, in sock_connect
+    return await self._proactor.connect(sock, address)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 817, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Python310\lib\asyncio\windows_events.py", line 604, in finish_connect
+    ov.getresult()
+ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 164, in _initialize_client
+    await self._redis_client.ping()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\client.py", line 673, in execute_command
+    conn = self.connection or await pool.get_connection()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1145, in get_connection
+    await self.ensure_connection(connection)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 1178, in ensure_connection
+    await connection.connect()
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 296, in connect
+    await self.connect_check_health(check_health=True)
+  File "C:\Users\Jorda\AppData\Roaming\Python\Python310\site-packages\redis\asyncio\connection.py", line 310, in connect_check_health
+    raise ConnectionError(self._error_message(e))
+redis.exceptions.ConnectionError: Error 22 connecting to localhost:6379. The remote computer refused the network connection.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Jorda\Desktop\minimal_bot\test_database_backend_switching.py", line 347, in test_backend_performance_comparison
+    await self.redis_storage.write(test_data)
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 239, in write
+    await self._ensure_client_initialized()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 127, in _ensure_client_initialized
+    await self._initialize_client()
+  File "C:\Users\Jorda\Desktop\minimal_bot\bot_core\redis_storage.py", line 171, in _initialize_client
+    raise RedisStorageError(f"Failed to connect to Redis: {e}") from e
+bot_core.redis_storage.RedisStorageError: Failed to connect to Redis: Error 22 connecting to localhost:6379. The remote computer refused the network connection.

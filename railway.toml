@@ -1,0 +1,19 @@
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[services]]
+name = "minimal-bot"
+
+[services.variables]
+PORT = "3978"
+PYTHONPATH = "/app"
+PYTHONUNBUFFERED = "1"
+
+[services.healthcheck]
+path = "/healthz"
+timeout = 10
+interval = 30 

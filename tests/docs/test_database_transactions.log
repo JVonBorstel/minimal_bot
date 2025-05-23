@@ -1,0 +1,17 @@
+2025-05-23 05:10:31,599 - config - INFO - Initializing singleton Config instance...
+2025-05-23 05:10:31,608 - config - INFO - Starting Pydantic validation with prepared dictionary...
+2025-05-23 05:10:31,608 - config - WARNING - Port in APP_BASE_URL ('8501') does not match target PORT ('8501'). Overriding APP_BASE_URL port.
+2025-05-23 05:10:31,615 - config - INFO - Pydantic settings loaded and validated successfully.
+2025-05-23 05:10:31,615 - config - INFO - Configuration loaded and validated successfully (config.py).
+2025-05-23 05:10:31,616 - config - INFO - App Environment: development
+2025-05-23 05:10:31,616 - config - INFO - Log Level: DEBUG
+2025-05-23 05:10:31,616 - config - INFO - Default Gemini Model: models/gemini-2.0-flash
+2025-05-23 05:10:31,617 - config - INFO - Available Personas: ['Default', 'Concise Communicator', 'Detailed Explainer', 'Code Reviewer']
+2025-05-23 05:10:31,617 - config - INFO - Default Persona: Default
+2025-05-23 05:10:31,617 - config - INFO - Singleton Config instance created.
+2025-05-23 05:10:31,633 - __main__ - INFO - Test result - Storage Initialization: PASS - Clean storage initialized
+2025-05-23 05:10:31,642 - __main__ - INFO - Test result - Atomic Write Operations: PASS - All 3 sessions written atomically in 0.004s
+2025-05-23 05:10:31,850 - __main__ - INFO - Test result - Concurrent User Operations: PASS - Success rate: 100.0%, 40/40 operations, data isolation intact
+2025-05-23 05:10:32,581 - __main__ - INFO - Test result - Transaction Rollback Safety: PASS - Large write succeeded without corruption
+2025-05-23 05:10:36,009 - __main__ - INFO - Test result - Data Consistency Under Load: PASS - Success rate: 100.0%, 201 final messages, 58.7 ops/sec
+2025-05-23 05:10:36,506 - __main__ - INFO - Test result - Deadlock Prevention: PASS - No deadlock detected, completed in 0.49s
