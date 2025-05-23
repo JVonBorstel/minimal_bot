@@ -10,6 +10,7 @@ import json
 import traceback
 from typing import Dict, Any
 import logging
+import pytest # Add pytest
 
 # Configure logging to see what's happening
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -52,6 +53,7 @@ def print_result(label: str, value: Any, max_length: int = 500):
     else:
         print(f"📝 {label}: {value}")
 
+@pytest.mark.asyncio
 async def test_configuration():
     """Test Perplexity configuration and setup."""
     print_section("TESTING PERPLEXITY CONFIGURATION")
@@ -87,6 +89,7 @@ async def test_configuration():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_direct_api_access():
     """Test direct API access outside tool framework."""
     print_section("TESTING DIRECT PERPLEXITY API ACCESS")
@@ -146,6 +149,7 @@ async def test_direct_api_access():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_tool_framework_setup():
     """Test tool framework setup and tool discovery."""
     print_section("TESTING TOOL FRAMEWORK SETUP")
@@ -189,6 +193,7 @@ async def test_tool_framework_setup():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_perplexity_web_search():
     """Test perplexity_web_search tool with real queries."""
     print_section("TESTING PERPLEXITY WEB SEARCH TOOL")
@@ -270,6 +275,7 @@ async def test_perplexity_web_search():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_perplexity_summarize_topic():
     """Test perplexity_summarize_topic tool with real topics."""
     print_section("TESTING PERPLEXITY SUMMARIZE TOPIC TOOL")
@@ -352,6 +358,7 @@ async def test_perplexity_summarize_topic():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_perplexity_structured_search():
     """Test perplexity_structured_search tool with real structured queries."""
     print_section("TESTING PERPLEXITY STRUCTURED SEARCH TOOL")
@@ -385,6 +392,7 @@ async def test_perplexity_structured_search():
         traceback.print_exc()
         return False
 
+@pytest.mark.asyncio
 async def test_error_handling():
     """Test error handling with invalid inputs."""
     print_section("TESTING ERROR HANDLING")

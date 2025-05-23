@@ -1,6 +1,28 @@
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List  # Added List
+from pydantic import BaseModel, Field, ConfigDict
 import time
+# Removed: from state_models import ToolSelectionMetrics
+
+class ToolSelectionRecord(BaseModel):
+    """
+    Record of a tool selection event for analytics and learning.
+    """
+    timestamp: float = Field(default_factory=time.time)
+    query: str
+    selected_tools: List[str]  # List of tool names that were selected
+    used_tools: List[str] = []  # List of tools that were actually used
+    success_rate: Optional[float] = None  # Success rate if calculated
+
+
+class ToolSelectionMetrics(BaseModel):
+    """
+    Metrics for the tool selection system.
+    """
+    total_selections: int = 0
+    # Selection where at least one tool was used
+    successful_selections: int = 0
+    selection_records: List[ToolSelectionRecord] = Field(default_factory=list)
+
 
 class UserProfile(BaseModel):
     """
@@ -20,11 +42,10 @@ class UserProfile(BaseModel):
     profile_data: Optional[Dict[str, Any]] = Field(None, description="JSON blob for additional, extensible attributes.")
     profile_version: int = Field(1, description="Version number for the profile schema.")
 
-    class Config:
-        # Example for Pydantic V2 if you were using it for ORM-like features
-        # from_attributes = True 
-        # For Pydantic V1, or basic model usage, this is often not needed or `orm_mode = True`
-        pass
+    # Field for user-global tool adapter learning
+    tool_adapter_metrics: ToolSelectionMetrics = Field(default_factory=ToolSelectionMetrics, description="User-specific metrics for tool adapter learning.")
+
+    model_config = ConfigDict()
 
     def update_last_active(self) -> None:
         """Updates the last_active_timestamp to the current time."""

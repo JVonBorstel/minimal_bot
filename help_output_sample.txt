@@ -1,0 +1,39 @@
+Title: 🤖 Augie ChatOps Bot - Help & Commands
+Description: I'm here to help you with development tasks, project management, and information retrieval!
+
+## 🌟 Getting Started
+  Just type naturally! I understand context and can help with:
+  • Creating and managing GitHub issues and pull requests
+  • Working with Jira tickets and project planning
+  • Searching code and repositories
+  • Finding information online
+  • And much more!
+
+## 💡 Example Commands
+  **GitHub:**
+  • 'Create a GitHub issue for the login bug'
+  • 'Show my open pull requests'
+  • 'Search for authentication code in the repository'
+  
+  **Jira:**
+  • 'Create a new Jira ticket for the API feature'
+  • 'Show my assigned Jira issues'
+  • 'What's in the current sprint?'
+  
+  **Code & Search:**
+  • 'Find all Python files with database queries'
+  • 'Search the web for React best practices'
+  • 'Analyze the codebase structure'
+
+## 🛠️ Available Tool Categories
+  **GitHub Tools**: Repository management, issues, PRs, code search
+  **Jira Tools**: Project management, tickets, sprints, workflows
+  **Greptile Tools**: Semantic code search and analysis
+  **Perplexity Tools**: Web search and current information
+  **Core Tools**: Help, status, and basic utilities
+
+## 💡 Pro Tips
+  • Be specific about what you want to do
+  • I maintain context, so you can have natural conversations
+  • For complex tasks, I'll guide you through the process
+  • Just ask if you need clarification on anything!

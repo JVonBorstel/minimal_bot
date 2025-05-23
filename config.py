@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 from typing import Dict, Any, Optional, List, Literal, Union, cast
 import re
+import threading
 
 from dotenv import load_dotenv, find_dotenv
 from pydantic import (
@@ -14,101 +15,62 @@ from pydantic import (
     ValidationError,
     field_validator,
     model_validator,
+    ConfigDict,
 )
+
+# Try to import BaseSettings, fall back to BaseModel if not available
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:
+    # Fallback for older pydantic versions or missing pydantic-settings
+    BaseSettings = BaseModel
+    print("Warning: pydantic-settings not found. Environment variable loading may not work properly.")
 
 log = logging.getLogger(__name__)
 
 # --- Custom Logging Filter ---
+# DuplicateFilter remains unchanged, so it's omitted for brevity here but should be kept in your actual file.
 class DuplicateFilter(logging.Filter):
-    """
-    Suppresses repeated log messages.
-    """
     def __init__(self, name=''):
         super().__init__(name)
         self.last_log = None
         self.last_log_count = 0
-        self.max_count = 3  # Show the first 3 occurrences of each message
-
+        self.max_count = 3
     def filter(self, record):
-        # Get message and compare with last seen
         current_log = record.getMessage()
-
         if current_log == self.last_log:
             self.last_log_count += 1
-            # Only show the first max_count messages
-            if self.last_log_count <= self.max_count:
-                return True
-            
-            # For every 50th repeat after max_count, show a summary
+            if self.last_log_count <= self.max_count: return True
             if self.last_log_count % 50 == 0:
                 record.msg = f"Previous message repeated {self.last_log_count} times: {record.msg}"
                 return True
             return False
         else:
-            # If we had repeats before this new message, log a final summary
             if self.last_log and self.last_log_count > self.max_count:
-                # Use the same logger as the current record
                 logger = logging.getLogger(record.name)
-                logger.log(
-                    record.levelno,
-                    f"Previous message repeated {self.last_log_count-self.max_count} more times: {self.last_log}"
-                )
-
-            # Reset for new message
+                logger.log(record.levelno, f"Previous message repeated {self.last_log_count-self.max_count} more times: {self.last_log}")
             self.last_log = current_log
             self.last_log_count = 1
             return True
 
-# Load environment variables from .env file first
-# This makes them available for Pydantic validation
-# Ensures that if this module is imported elsewhere, .env is loaded.
-# load_dotenv()  # Actually load the .env file # REMOVED: This should be handled only in app.py
-
 # --- Constants ---
-
-# Define available personas for the bot
-# Key: Display Name, Value: Associated internal prompt fragment or identifier (can be expanded later)
-# For now, just using names. Logic to use these will be in chat_logic.py
-AVAILABLE_PERSONAS: List[str] = [
-    "Default", # Standard Augie persona defined by SYSTEM_PROMPT
-    "Concise Communicator", # A persona that prioritizes brevity
-    "Detailed Explainer", # A persona that elaborates more
-    "Code Reviewer", # A persona focused on code analysis tasks
-]
+AVAILABLE_PERSONAS: List[str] = ["Default", "Concise Communicator", "Detailed Explainer", "Code Reviewer"]
 DEFAULT_PERSONA: str = "Default"
+DEFAULT_GEMINI_MODEL = "models/gemini-1.5-pro-latest" # Consider gemini-1.5-pro-latest for better reasoning
 
-# Default Gemini model if not specified in .env
-DEFAULT_GEMINI_MODEL = "models/gemini-1.5-pro-latest"
+AVAILABLE_GEMINI_MODELS_REF = ["models/gemini-1.5-flash-latest", "models/gemini-1.5-pro-latest"] # Updated
+AVAILABLE_PERPLEXITY_MODELS_REF = ["sonar", "sonar-pro", "sonar-reasoning", "sonar-reasoning-pro", "sonar-deep-research", "r1-1776"]
 
-# Dynamically get available models if SDK is available, otherwise use hardcoded list
-# This list is mainly for reference or potential validation if needed later.
-# The actual model availability is checked by the SDK/API.
-AVAILABLE_GEMINI_MODELS_REF = [
-    "models/gemini-2.0-flash",
-    "models/gemini-1.5-flash-latest",
-    "models/gemini-1.5-pro-latest",
-    # Add other known compatible models if necessary
-]
-
-AVAILABLE_PERPLEXITY_MODELS_REF = [
-    "sonar",
-    "sonar-pro",
-    "sonar-reasoning",
-    "sonar-reasoning-pro",
-    "sonar-deep-research",
-    "r1-1776"
-]
-
-# Define which env vars are needed for each logical tool/service
-# Used by Config.is_tool_configured
 TOOL_CONFIG_REQUIREMENTS: Dict[str, List[str]] = {
     "jira": ["JIRA_API_URL", "JIRA_API_EMAIL", "JIRA_API_TOKEN"],
     "greptile": ["GREPTILE_API_KEY"],
     "perplexity": ["PERPLEXITY_API_KEY"],
+    # GitHub is checked by the presence of GITHUB_ACCOUNT_n_TOKEN and GITHUB_ACCOUNT_n_NAME
 }
 
 # --- NEW PROMPTS ---
-# Using constants directly, simplifies AppSettings model
+# ROUTER_SYSTEM_PROMPT and STORY_BUILDER_SYSTEM_PROMPT remain unchanged, omitted for brevity here.
+# Ensure they are present in your actual file.
 ROUTER_SYSTEM_PROMPT = """You are Augie, a helpful and versatile ChatOps assistant. Your primary goal is to understand the user's request and determine the best course of action.
 
 Available Actions:
@@ -219,34 +181,62 @@ This ticket provides a detailed outline of the requirements and expected functio
 """
 
 # --- Pydantic Models for Settings Validation ---
+# GitHubAccountConfig and AppSettings model definitions remain largely the same.
+# Key changes will be in the DEFAULT_SYSTEM_PROMPT and potentially the defaults for AppSettings.
+# For brevity, the full Pydantic models are not repeated here but ensure they are in your actual file.
 
 class GitHubAccountConfig(BaseModel):
-    """Configuration for a single GitHub account/instance."""
     name: str = Field(..., description="Unique identifier for this GitHub configuration (e.g., 'personal', 'work').")
     token: str = Field(..., description="GitHub Personal Access Token (PAT) or other token.")
     base_url: Optional[HttpUrl] = Field(None, description="Base URL for GitHub Enterprise instances. Leave None for github.com.")
+    model_config = ConfigDict(extra='ignore')
 
-    class Config:
-        extra = 'ignore'
+# MODIFIED: Define the new default system prompt with more flexibility
+DEFAULT_SYSTEM_PROMPT = """You are Augie, a highly capable and proactive ChatOps assistant for development teams. Your primary goal is to understand user requests, plan execution steps, and leverage your available tools (like GitHub, Jira, Greptile, Perplexity) to accomplish tasks efficiently and accurately.
 
-class AppSettings(BaseModel):
-    """Pydantic model defining and validating ALL application settings."""
-    # Core App Settings
+**Key Instructions - Tool Usage & Interaction:**
+
+1.  **Deconstruct Requests:** Break down complex user requests into logical steps.
+2.  **Plan Tool Use:** Before acting, especially for multi-step tasks, briefly outline which tools you intend to use.
+3.  **Precise Execution:** Call tools with accurate and complete arguments derived from the user request and conversation context. Use the exact function names and parameters provided.
+4.  **Clarification is Key:**
+    *   If a request is ambiguous or lacks necessary details (e.g., missing repository name, issue key, specific search terms), **ASK TARGETED CLARIFYING QUESTIONS** before proceeding with a tool call. Do not guess if critical information is missing.
+    *   If you need to assume a default (e.g., a default Jira project or GitHub user), state your assumption clearly (e.g., "I'll use the default Jira project 'PROJ'. Is that correct?").
+5.  **Synthesize Results:** Combine information from multiple tool calls or context to provide comprehensive answers.
+6.  **Error Handling & Reporting:** When a tool call results in an error:
+    *   Prioritize relaying the `user_facing_message` from the tool\'s response to the user. This message is designed to be clear and helpful.
+    *   If `user_facing_message` is generic (e.g., 'An unexpected error occurred'), and more specific `technical_details` are available in the tool\'s error response, you can use the `technical_details` to try and provide a more context-aware explanation or suggestion to the user. However, AVOID exposing raw stack traces or overly technical jargon directly from `technical_details`.
+    *   If appropriate, suggest how the user might correct their request or if the issue seems like a system problem they should report.
+    *   Example: If a tool returns `{{\\"status\\": \\"ERROR\\", \\"user_facing_message\\": \\"I couldn\'t find the JIRA project specified.\\", \\"technical_details\\": \\"JiraProjectNotFound: Project XZY does not exist\\"}}`, you might say: "I couldn\'t find the JIRA project you mentioned. Could you please double-check the project key or name?"
+7.  **Contextual Awareness:** Remember previous interactions in the current conversation to inform subsequent actions and responses.
+8.  **Efficiency & Nuance:** Provide concise yet complete information, highlighting important details.
+
+**Example Clarification:**
+User: "Search GitHub for \'auth bug\'."
+Augie: "Okay, I can search GitHub for \'auth bug\'. Do you want to search in a specific repository, or across all accessible repositories?"
+
+Think step-by-step and validate your plan before acting, especially if it involves multiple tools or critical actions.
+"""
+
+class AppSettings(BaseSettings):
     app_env: Literal["development", "production"] = Field("development", alias="APP_ENV")
-    port: int = Field(3978, alias="PORT", gt=0, lt=65536) # Default Bot Framework port
+    port: int = Field(3978, alias="PORT", gt=0, lt=65536)
     app_base_url: Optional[HttpUrl] = Field(None, alias="APP_BASE_URL")
     teams_bot_endpoint: Optional[HttpUrl] = Field(None, alias="TEAMS_BOT_ENDPOINT")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field("INFO", alias="LOG_LEVEL")
     mock_mode: bool = Field(False, alias="MOCK_MODE")
 
-    # LLM Settings
+    # API Endpoints
+    bot_api_messages_endpoint: str = Field("/api/messages", alias="BOT_API_MESSAGES_ENDPOINT")
+    bot_api_healthcheck_endpoint: str = Field("/api/healthz", alias="BOT_API_HEALTHCHECK_ENDPOINT")
+
     gemini_api_key: str = Field(..., alias="GEMINI_API_KEY")
     gemini_model: str = Field(DEFAULT_GEMINI_MODEL, alias="GEMINI_MODEL")
     llm_max_history_items: int = Field(50, alias="LLM_MAX_HISTORY_ITEMS", gt=0)
 
-    # Agent Behavior Settings
+    # MODIFIED: Default system prompt placeholder, will be replaced by the new DEFAULT_SYSTEM_PROMPT constant.
     system_prompt: str = Field(
-        "DEFAULT_SYSTEM_PROMPT_PLACEHOLDER",
+        DEFAULT_SYSTEM_PROMPT,
         alias="SYSTEM_PROMPT"
     )
     max_consecutive_tool_calls: int = Field(5, alias="MAX_CONSECUTIVE_TOOL_CALLS", gt=0)
@@ -254,53 +244,42 @@ class AppSettings(BaseModel):
     default_api_max_retries: int = Field(2, alias="DEFAULT_API_MAX_RETRIES", ge=0)
     break_on_critical_tool_error: bool = Field(True, alias="BREAK_ON_CRITICAL_TOOL_ERROR")
     
-    # --- Bot Framework Specific Settings ---
     MicrosoftAppId: Optional[str] = Field(None, alias="MICROSOFT_APP_ID")
     MicrosoftAppPassword: Optional[str] = Field(None, alias="MICROSOFT_APP_PASSWORD")
+    MicrosoftAppType: Optional[str] = Field(None, alias="MICROSOFT_APP_TYPE")
 
-    # --- Tool-Specific Settings (Flattened) ---
-    # GitHub (Multiple Accounts)
-    github_accounts: List[GitHubAccountConfig] = Field(
-        default_factory=list,
-        description="List of configured GitHub accounts/instances."
-    )
-    github_default_account_name: Optional[str] = Field(
-        None,
-        alias="GITHUB_DEFAULT_ACCOUNT_NAME",
-        description="The 'name' of the GitHub account to use by default if not specified."
-    )
-    # Jira
+    github_accounts: List[GitHubAccountConfig] = Field(default_factory=list)
+    github_default_account_name: Optional[str] = Field(None, alias="GITHUB_DEFAULT_ACCOUNT_NAME")
+    
     jira_api_url: Optional[HttpUrl] = Field(None, alias="JIRA_API_URL")
     jira_api_email: Optional[EmailStr] = Field(None, alias="JIRA_API_EMAIL")
     jira_api_token: Optional[str] = Field(None, alias="JIRA_API_TOKEN")
     jira_default_project_key: str = Field("PROJ", alias="JIRA_DEFAULT_PROJECT_KEY")
     jira_default_issue_type: str = Field("Story", alias="JIRA_DEFAULT_ISSUE_TYPE")
-    # Greptile
+
     greptile_api_key: Optional[str] = Field(None, alias="GREPTILE_API_KEY")
     greptile_api_url: HttpUrl = Field("https://api.greptile.com/v2", alias="GREPTILE_API_URL") # type: ignore[assignment]
     greptile_default_repo: Optional[str] = Field(None, alias="GREPTILE_DEFAULT_REPO")
-    # Perplexity
+
     perplexity_api_key: Optional[str] = Field(None, alias="PERPLEXITY_API_KEY")
     perplexity_api_url: HttpUrl = Field("https://api.perplexity.ai", alias="PERPLEXITY_API_URL") # type: ignore[assignment]
     perplexity_model: str = Field("sonar-pro", alias="PERPLEXITY_MODEL")
 
+    # Granular Debug Logging Flags
+    log_detailed_appstate: bool = Field(False, alias="LOG_DETAILED_APPSTATE")
+    log_llm_interaction: bool = Field(False, alias="LOG_LLM_INTERACTION") # For full prompts/responses
+    log_tool_io: bool = Field(False, alias="LOG_TOOL_IO") # For full tool inputs/outputs
+
+    # Validators remain the same, omitted for brevity
     @field_validator('jira_api_token', 'jira_api_email', 'jira_api_url', mode='before')
     def _ensure_jira_fields_not_empty_if_provided(cls, v: Optional[Any], info: Any) -> Optional[Any]:
-        if v is not None and isinstance(v, str) and not v.strip():
-            # If a string is provided but it's empty, treat it as None for further validation.
-            return None
+        if v is not None and isinstance(v, str) and not v.strip(): return None
         return v
 
     @model_validator(mode='after')
     def _check_jira_config_complete(self) -> 'AppSettings':
-        jira_fields_map = {
-            'jira_api_url': self.jira_api_url,
-            'jira_api_email': self.jira_api_email,
-            'jira_api_token': self.jira_api_token
-        }
-        
+        jira_fields_map = {'jira_api_url': self.jira_api_url, 'jira_api_email': self.jira_api_email, 'jira_api_token': self.jira_api_token}
         set_fields = {field for field, value in jira_fields_map.items() if value is not None and str(value).strip()}
-        
         if 0 < len(set_fields) < len(jira_fields_map):
             missing_fields = []
             for field_name, value in jira_fields_map.items():
@@ -308,799 +287,536 @@ class AppSettings(BaseModel):
                     pydantic_field = self.model_fields.get(field_name)
                     env_var_name = pydantic_field.alias if pydantic_field and pydantic_field.alias else field_name.upper()
                     missing_fields.append(f"{field_name} (env var: {env_var_name})")
-            
             if missing_fields:
                 error_message = f"Jira configuration incomplete: If any Jira setting is provided, all are required. Missing values for: {', '.join(missing_fields)}."
                 log.error(error_message)
                 raise ValueError(error_message)
         return self
 
-    # GitHub cross-field validation (ensure default account exists if specified)
     @model_validator(mode='after')
     def check_github_default_account(self) -> 'AppSettings':
         if self.github_default_account_name and self.github_accounts:
             account_names = {acc.name for acc in self.github_accounts}
             if self.github_default_account_name not in account_names:
-                raise ValueError(
-                    f"Invalid GITHUB_DEFAULT_ACCOUNT_NAME ('{self.github_default_account_name}'). "
-                    f"It does not match any configured account name: {list(account_names)}"
-                )
+                raise ValueError(f"Invalid GITHUB_DEFAULT_ACCOUNT_NAME ('{self.github_default_account_name}'). Does not match: {list(account_names)}")
         elif self.github_default_account_name and not self.github_accounts:
-             raise ValueError(
-                 "GITHUB_DEFAULT_ACCOUNT_NAME is set, but no GitHub accounts are configured (GITHUB_ACCOUNT_n_... variables)."
-             )
+             raise ValueError("GITHUB_DEFAULT_ACCOUNT_NAME is set, but no GitHub accounts are configured.")
         return self
 
     state_db_path: str = Field("db/state.sqlite", alias="STATE_DB_PATH")
-
-    # Security Settings
     security_rbac_enabled: bool = Field(False, alias="SECURITY_RBAC_ENABLED")
+    admin_user_id: Optional[str] = Field(None, alias="ADMIN_USER_ID")
+    admin_user_name: Optional[str] = Field(None, alias="ADMIN_USER_NAME") 
+    admin_user_email: Optional[EmailStr] = Field(None, alias="ADMIN_USER_EMAIL")
 
-    # Admin User Settings
-    admin_user_id: Optional[str] = Field(None, alias="ADMIN_USER_ID", description="User ID for permanent admin user")
-    admin_user_name: Optional[str] = Field(None, alias="ADMIN_USER_NAME", description="Display name for permanent admin user") 
-    admin_user_email: Optional[EmailStr] = Field(None, alias="ADMIN_USER_EMAIL", description="Email for permanent admin user")
-
-    # Storage Settings
     memory_type: Literal["sqlite", "redis"] = Field("sqlite", alias="MEMORY_TYPE")
-    # Redis Specific Settings (optional, only used if memory_type is 'redis')
-    redis_url: Optional[str] = Field(None, alias="REDIS_URL", description="Full Redis connection URL (e.g., redis://user:pass@host:port/db). Overrides individual host/port/db/ssl settings if provided.")
+    redis_url: Optional[str] = Field(None, alias="REDIS_URL")
     redis_host: Optional[str] = Field("localhost", alias="REDIS_HOST")
     redis_port: Optional[int] = Field(6379, alias="REDIS_PORT")
     redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
-    redis_db: int = Field(default=0, description="Redis database number.")
-    redis_ssl_enabled: bool = Field(default=False, description="Enable SSL for Redis connection.")
-    redis_prefix: str = Field(default="botstate:", description="Prefix for all keys stored in Redis by this bot instance.")
+    redis_db: int = Field(default=0)
+    redis_ssl_enabled: bool = Field(default=False)
+    redis_prefix: str = Field(default="botstate:")
 
+    # Validators for app_base_url, teams_bot_endpoint, redis_config_if_needed remain unchanged
+    # Omitted for brevity.
     @field_validator('app_base_url', mode='before')
     @classmethod
     def derive_app_base_url(cls, v: Optional[str], info: Any) -> str:
-        """Derives app_base_url from PORT if not explicitly set or ensures port consistency."""
-        
-        port_field_name = 'port'
-        port_field_alias = cls.model_fields[port_field_name].alias or port_field_name # Alias is 'PORT'
-        
-        port_val_from_data = info.data.get(port_field_alias) # Try alias 'PORT' first
-        if port_val_from_data is None:
-            port_val_from_data = info.data.get(port_field_name) # Then try field name 'port'
-
+        port_field_name = 'port'; port_field_alias = cls.model_fields[port_field_name].alias or port_field_name
+        port_val_from_data = info.data.get(port_field_alias)
+        if port_val_from_data is None: port_val_from_data = info.data.get(port_field_name)
         actual_port: int
         if port_val_from_data is not None:
             try:
                 actual_port = int(port_val_from_data)
-                if not (0 < actual_port < 65536):
-                    log.warning(f"Port value '{port_val_from_data}' (from key '{port_field_alias if info.data.get(port_field_alias) else port_field_name}') is out of valid range. Defaulting to 3978.")
-                    actual_port = 3978
-            except (ValueError, TypeError):
-                log.warning(f"Invalid port value '{port_val_from_data}' (from key '{port_field_alias if info.data.get(port_field_alias) else port_field_name}'). Defaulting to 3978.")
-                actual_port = 3978
-        else:
-            log.warning(f"Port not found in raw input (keys '{port_field_alias}', '{port_field_name}'). Using default from field: {cls.model_fields[port_field_name].default}")
-            actual_port = cls.model_fields[port_field_name].default 
-            if actual_port is None: 
-                actual_port = 3978
-
+                if not (0 < actual_port < 65536): actual_port = 3978
+            except (ValueError, TypeError): actual_port = 3978
+        else: actual_port = cls.model_fields[port_field_name].default if cls.model_fields[port_field_name].default is not None else 3978
         if v: 
             try:
-                parsed_url = HttpUrl(v) 
-                current_port_in_url_str = parsed_url.port
-                expected_port_str = str(actual_port)
-
+                parsed_url = HttpUrl(v); current_port_in_url_str = parsed_url.port; expected_port_str = str(actual_port)
                 if current_port_in_url_str is None:
-                    if not ((parsed_url.scheme == "http" and expected_port_str == "80") or \
-                            (parsed_url.scheme == "https" and expected_port_str == "443")):
-                        new_url_str = f"{parsed_url.scheme}://{parsed_url.host}:{actual_port}{parsed_url.path or ''}"
-                        log.info(f"APP_BASE_URL '{v}' had no explicit port, adjusted to: '{new_url_str}'")
-                        return new_url_str
+                    if not ((parsed_url.scheme == "http" and expected_port_str == "80") or (parsed_url.scheme == "https" and expected_port_str == "443")):
+                        return f"{parsed_url.scheme}://{parsed_url.host}:{actual_port}{parsed_url.path or ''}"
                 elif current_port_in_url_str != expected_port_str:
-                    log.warning(
-                        f"Port in APP_BASE_URL ('{current_port_in_url_str}') "
-                        f"does not match target PORT ('{actual_port}'). Overriding APP_BASE_URL port."
-                    )
-                    new_url_str = f"{parsed_url.scheme}://{parsed_url.host}:{actual_port}{parsed_url.path or ''}"
-                    return new_url_str
+                    return f"{parsed_url.scheme}://{parsed_url.host}:{actual_port}{parsed_url.path or ''}"
                 return v 
-            except Exception as e: 
-                log.error(f"Error parsing or adjusting provided APP_BASE_URL '{v}': {e}. Falling back to default.")
-        
-        default_url_str = f"http://127.0.0.1:{actual_port}"
-        log.info(f"APP_BASE_URL not provided or adjustment failed, defaulting to: {default_url_str}")
-        return default_url_str
+            except Exception: pass
+        return f"http://127.0.0.1:{actual_port}"
 
     @model_validator(mode='after')
     def _ensure_app_base_url_default(self) -> 'AppSettings':
-        """Ensures app_base_url has a default if it wasn't provided or resolved to None."""
         if self.app_base_url is None:
-            # self.port is already validated and available as an int
-            actual_port = self.port
-            default_url_str = f"http://127.0.0.1:{actual_port}"
-            log.info(
-                f"APP_BASE_URL was not set or resulted in None after field processing, "
-                f"applying default in model_validator: {default_url_str}"
-            )
-            try:
-                # Directly assign the parsed HttpUrl object
-                self.app_base_url = HttpUrl(default_url_str)
-            except ValidationError as e:
-                # This case should ideally not be reached if default_url_str is always valid.
-                log.critical(f"CRITICAL: Failed to parse internally constructed default APP_BASE_URL '{default_url_str}': {e}")
-                # Raising a ValueError here will make the model validation fail, which is appropriate.
-                raise ValueError(f"Internal error: Constructed default APP_BASE_URL '{default_url_str}' is invalid.") from e
+            actual_port = self.port; default_url_str = f"http://127.0.0.1:{actual_port}"
+            try: self.app_base_url = HttpUrl(default_url_str)
+            except ValidationError as e: raise ValueError(f"Internal error: Constructed default APP_BASE_URL '{default_url_str}' is invalid.") from e
         return self
 
     @model_validator(mode='after')
     def derive_teams_bot_endpoint(self) -> 'AppSettings':
-        """Derives teams_bot_endpoint from app_base_url."""
         if self.app_base_url:
-            # Ensure app_base_url is a string before joining path
-            base_url_str = str(self.app_base_url)
-            # Ensure no double slashes if base_url_str ends with / and path starts with /
-            path_segment = "/api/messages"
-            if base_url_str.endswith('/') and path_segment.startswith('/'):
-                derived_endpoint = base_url_str + path_segment[1:]
-            elif not base_url_str.endswith('/') and not path_segment.startswith('/'):
-                 derived_endpoint = base_url_str + "/" + path_segment
-            else:
-                derived_endpoint = base_url_str + path_segment
-            
-            # If TEAMS_BOT_ENDPOINT was set in env, check if it matches derived one (ignoring minor diffs like trailing slash)
+            base_url_str = str(self.app_base_url); path_segment = "/api/messages"
+            if base_url_str.endswith('/') and path_segment.startswith('/'): derived_endpoint = base_url_str + path_segment[1:]
+            elif not base_url_str.endswith('/') and not path_segment.startswith('/'): derived_endpoint = base_url_str + "/" + path_segment
+            else: derived_endpoint = base_url_str + path_segment
             env_teams_endpoint = os.environ.get("TEAMS_BOT_ENDPOINT")
             if env_teams_endpoint:
-                # Normalize both for comparison (e.g. remove trailing slashes)
-                normalized_env = env_teams_endpoint.rstrip('/')
-                normalized_derived = derived_endpoint.rstrip('/')
-                if normalized_env != normalized_derived:
-                    log.warning(
-                        f"TEAMS_BOT_ENDPOINT from environment ('{env_teams_endpoint}') does not match derived endpoint "
-                        f"('{derived_endpoint}') based on APP_BASE_URL and PORT. Using derived endpoint."
-                    )
-            self.teams_bot_endpoint = HttpUrl(derived_endpoint) # Validate and assign
-        elif os.environ.get("TEAMS_BOT_ENDPOINT"): # if app_base_url was somehow None, but TEAMS_BOT_ENDPOINT is set
-            log.warning("APP_BASE_URL is not set, but TEAMS_BOT_ENDPOINT is. Attempting to use TEAMS_BOT_ENDPOINT directly. This may lead to inconsistencies.")
+                normalized_env = env_teams_endpoint.rstrip('/'); normalized_derived = derived_endpoint.rstrip('/')
+                if normalized_env != normalized_derived: log.warning(f"TEAMS_BOT_ENDPOINT from env ('{env_teams_endpoint}') != derived ('{derived_endpoint}'). Using derived.")
+            self.teams_bot_endpoint = HttpUrl(derived_endpoint)
+        elif os.environ.get("TEAMS_BOT_ENDPOINT"):
+            log.warning("APP_BASE_URL not set, but TEAMS_BOT_ENDPOINT is. Using TEAMS_BOT_ENDPOINT directly.")
             self.teams_bot_endpoint = HttpUrl(os.environ.get("TEAMS_BOT_ENDPOINT"))
         else:
             log.error("Could not derive TEAMS_BOT_ENDPOINT as APP_BASE_URL is not available.")
-            self.teams_bot_endpoint = None # Or raise an error if it's critical
+            self.teams_bot_endpoint = None
         return self
-
+    
     @model_validator(mode='after')
     def check_redis_config_if_needed(self) -> 'AppSettings':
-        """Checks Redis configuration if memory_type is 'redis'."""
         if self.memory_type == "redis":
             if self.redis_url:
-                # If redis_url is provided, it takes precedence.
-                # Basic check to ensure it's not just an empty string if provided.
-                if not str(self.redis_url).strip():
-                    raise ValueError("REDIS_URL is set but empty. Please provide a valid Redis connection URL or unset it to use individual host/port settings.")
-                # Further validation of the URL could be done here if needed,
-                # but pydantic's HttpUrl (or a custom regex) might be too strict for redis URLs.
-                # For now, we assume if it's set, it's intended to be used as is.
+                if not str(self.redis_url).strip(): raise ValueError("REDIS_URL is set but empty.")
                 log.info(f"Using REDIS_URL for Redis connection: {self.redis_url}")
-            elif not self.redis_host: # redis_host has a default, so this check is mainly for explicit None/empty
-                raise ValueError("REDIS_HOST must be set if REDIS_URL is not provided and memory_type is 'redis'.")
+            elif not self.redis_host: raise ValueError("REDIS_HOST must be set if REDIS_URL is not provided and memory_type is 'redis'.")
         return self
 
-    class Config:
-        env_file_encoding = 'utf-8'
-        extra = 'ignore'
-
-# Define the default system prompt separately for readability
-DEFAULT_SYSTEM_PROMPT = """You are an AI assistant for development teams.
-
-**CRITICAL TOOL USAGE RULES - FOLLOW EXACTLY:**
-
-1. **ALWAYS USE TOOLS FOR DATA REQUESTS** - Never ask permission or explain first
-   - "repos/repositories" → IMMEDIATELY call github_list_repositories  
-   - "tickets/issues/jira" → IMMEDIATELY call jira_get_issues_by_user with email
-   - "search code" → IMMEDIATELY call greptile_search_code
-   - "search/google/what is" → IMMEDIATELY call perplexity_web_search
-
-2. **PATTERN MATCHING EXAMPLES:**
-   - "show my repos" → github_list_repositories 
-   - "list tickets" → jira_get_issues_by_user
-   - "find function X" → greptile_search_code  
-   - "what is Y" → perplexity_web_search
-
-3. **NEVER ASK THESE QUESTIONS:**
-   - ❌ "Could you please specify..."
-   - ❌ "What's your email for Jira?"  
-   - ❌ "What specifically would you like..."
-   - ❌ "Could you provide more context..."
-
-4. **ALWAYS ASSUME:**
-   - Use jvonborstel@take3tech.com for Jira email if needed
-   - Extract search terms from user message for code/web search
-   - Default to reasonable parameters
-
-**IF USER ASKS FOR ANY DATA - USE TOOLS IMMEDIATELY. NO EXCEPTIONS.**"""
-
-# Replace placeholder in the model definition
-AppSettings.model_fields['system_prompt'].default = DEFAULT_SYSTEM_PROMPT
-
-# --- Main Configuration Class ---
-class Config:
-    """Configuration class holding validated application settings."""
-    settings: AppSettings
-    AVAILABLE_PERSONAS: List[str] = AVAILABLE_PERSONAS
-    DEFAULT_PERSONA: str = DEFAULT_PERSONA
-    TOOL_CONFIG_REQUIREMENTS: Dict[str, List[str]] = TOOL_CONFIG_REQUIREMENTS
-    AVAILABLE_GEMINI_MODELS_REF: List[str] = AVAILABLE_GEMINI_MODELS_REF
-    AVAILABLE_PERPLEXITY_MODELS_REF: List[str] = AVAILABLE_PERPLEXITY_MODELS_REF
-    # Expose prompts as class attributes or properties
-    ROUTER_PROMPT: str = ROUTER_SYSTEM_PROMPT
-    STORY_BUILDER_PROMPT: str = STORY_BUILDER_SYSTEM_PROMPT
-    # Default system prompt as class attribute
-    DEFAULT_SYSTEM_PROMPT: str = DEFAULT_SYSTEM_PROMPT
-    
-    # Tool Integration Configuration
-    MAX_SERVICE_SCHEMA_PROPERTIES: int = 12  # Maximum properties to include in a service's parameter schema
-    MAX_TOOLS_BEFORE_FILTERING: int = 20    # Threshold above which to apply category filtering
-    MAX_FUNCTION_DECLARATIONS: int = 6      # Maximum number of services/function declarations to send to LLM
-    
-    # Define persona-specific system prompts
-    PERSONA_SYSTEM_PROMPTS: Dict[str, str] = {
-        "Default": DEFAULT_SYSTEM_PROMPT,
-        "Concise Communicator": """You are a concise AI assistant. Provide brief, direct answers without unnecessary explanations or introductions. Focus on giving just the essential information needed to answer the user's question. When using tools, explain your actions minimally.""",
-        "Detailed Explainer": """You are a thorough AI assistant that provides comprehensive explanations. Break down complex topics into clear, detailed explanations with examples when helpful. When using tools, explain your reasoning process, methodology, and how each step contributes to the solution.""",
-        "Code Reviewer": """You are a code review specialist. Focus on analyzing code for bugs, security issues, performance concerns, and adherence to best practices. Provide specific, actionable feedback with code examples to demonstrate improvements. When reviewing, consider readability, maintainability, edge cases, and potential optimizations."""
-    }
-    
-    # Tool Selector Configuration
-    TOOL_SELECTOR: Dict[str, Any] = {
-        "enabled": True,                           # Whether to use dynamic tool selection
-        "embedding_model": "all-MiniLM-L6-v2",     # SentenceTransformer model to use
-        "cache_path": "data/tool_embeddings.json", # Path to store the tool embeddings cache
-        "similarity_threshold": 0.20,              # Minimum similarity score to consider a tool relevant (Lowered from 0.25 to be very inclusive)
-        "max_tools": 10,                           # Maximum number of tools to select for each query (Keep high for multi-service scenarios)
-        "always_include_tools": [],               # Tools to always include regardless of relevance
-        "debug_logging": True,                    # Enable detailed logging of selection process
-        "default_fallback": True,                 # Fall back to all tools if selection fails
-        "rebuild_cache_on_startup": False,         # Whether to rebuild the tool embeddings cache on startup
-        "keyword_boosting": True,                 # Enable intelligent keyword-based boosting for multi-service scenarios
-        "multi_service_boost": 0.2,               # Boost score for tools when query suggests multi-service needs (increased)
-        "multi_service_keywords": [               # Keywords that suggest multi-service scenarios
-            "check", "compare", "match", "done", "implemented", "code", "ticket", "issue", 
-            "repository", "repo", "progress", "status", "both", "against", "vs", "and"
-        ],
-    }
-    
-    # Schema Optimization Configuration
-    SCHEMA_OPTIMIZATION: Dict[str, Any] = {
-        "enabled": True,                     # Whether to optimize schemas
-        "max_tool_description_length": 150,  # Max length for individual tool parameter descriptions
-        "max_tool_enum_values": 8,           # Max enum values for individual tool parameters
-        "max_tool_schema_properties": 12,    # Max properties for a single tool's schema (before service consolidation)
-        "max_nested_object_properties": 5,   # Max properties in a nested object before simplification
-        "max_array_item_properties": 4,      # Max properties for an object within an array before simplification
-        "simplify_complex_types": True,      # Existing: Whether to simplify oneOf/anyOf constructs
-        "flatten_nested_objects": False,     # Existing (but changed default): Whether to flatten deeply nested objects to string
-        "truncate_long_names": False,        # Existing (but changed default): Whether to truncate long property names
-        "max_name_length": 30,               # Existing: Maximum length for property names if truncation is enabled (if truncate_long_names is True)
-        # Deprecating or re-evaluating old keys if they were for different scope
-        # "max_description_length": 100,    # Old key, effectively replaced by max_tool_description_length
-        # "max_enum_values": 5,             # Old key, effectively replaced by max_tool_enum_values
-    }
-
-    # Internal state
-    _initial_log_level_set: bool = False
-    _tool_validation_cache: Dict[str, bool]
-    _tool_health_status: Dict[str, str]
-
-    def __init__(self):
-        """Loads and validates configuration from environment variables using Pydantic."""
-        try:
-            # 1. Initial basic logging (before full validation) - REMOVED
-            # initial_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-            # self._setup_initial_logging(initial_log_level)
-
-            # 2. Load environment variables from .env files
-            log.debug("Config.__init__: Loading .env files (if present)...")
-            load_dotenv(find_dotenv(usecwd=True), verbose=True, override=False) # Load .env, don't override existing os.environ
-
-            # 3. Prepare env vars for Pydantic validation
-            log.debug("Preparing environment variables for Pydantic validation...")
-            env_dict = dict(os.environ) # Use current environment
-            cleaned_env_dict: Dict[str, Any] = {} # Dict to pass to Pydantic
-            temp_github_accounts: Dict[int, Dict[str, str]] = {}
-            github_accounts_data: List[Dict[str, Optional[str]]] = []
-            github_var_pattern = re.compile(r"^GITHUB_ACCOUNT_(\d+)_(NAME|TOKEN|BASE_URL)$", re.IGNORECASE)
-
-            # Simplified GitHub account extraction without sanitization
-            # Iterates through all environment variables, looking for keys matching the
-            # GITHUB_ACCOUNT_n_NAME/TOKEN/BASE_URL pattern. It stores these temporarily
-            # by index number (n).
-            github_account_raw_keys_to_remove = set()
-            for key, value in env_dict.items():
-                match = github_var_pattern.match(key)
-                if match:
-                    index = int(match.group(1))
-                    field = match.group(2).lower() # 'name', 'token', 'base_url'
-                    if index not in temp_github_accounts:
-                        temp_github_accounts[index] = {}
-                    temp_github_accounts[index][field] = value # Use raw value
-                    log.debug(f"  Parsed GitHub var: Index={index}, Field='{field}'")
-                    github_account_raw_keys_to_remove.add(key) # Mark raw key for removal
-                else:
-                    # Store other variables directly for Pydantic
-                    cleaned_env_dict[key] = value
-
-            # Remove the raw GITHUB_ACCOUNT_n_... keys to avoid confusing Pydantic
-            if github_account_raw_keys_to_remove:
-                log.debug(f"Removing {len(github_account_raw_keys_to_remove)} raw GitHub account keys before validation.")
-                # No need to remove from cleaned_env_dict as they were never added there
-                # for key_to_remove in github_account_raw_keys_to_remove:
-                #     cleaned_env_dict.pop(key_to_remove, None) # Remove if present
-
-            # --- Construct GitHub Account List ---
-            log.debug("Constructing GitHub account list from parsed variables...")
-            for index in sorted(temp_github_accounts.keys()):
-                account_data = temp_github_accounts[index]
-
-                # Add debug logging as per Step 1, Mod 1
-                log.debug(f"Processing Account Index {index}:")
-                log.debug(f"  Raw account data keys: {list(account_data.keys())}") # Log keys for clarity
-                name_check_value = account_data.get('name')
-                token_check_value = account_data.get('token')
-                base_url_value = account_data.get('base_url') # Get base_url for logging
-
-                log.debug(f"  Name value from env: '{name_check_value}' (Type: {type(name_check_value)})")
-                log.debug(f"  Token value from env (first 5 chars): '{str(token_check_value)[:5] if token_check_value else None}' (Type: {type(token_check_value)}, IsSet: {token_check_value is not None})")
-                log.debug(f"  Base URL value from env: '{base_url_value}' (Type: {type(base_url_value)})")
-                log.debug(f"  Condition check: bool(name_check_value) -> {bool(name_check_value)}, bool(token_check_value) -> {bool(token_check_value)}")
-
-                # Basic check for required fields (name and token must exist and be non-empty)
-                if name_check_value and token_check_value:
-                    github_accounts_data.append({
-                        'name': name_check_value,
-                        'token': token_check_value,
-                        'base_url': base_url_value # Pass raw value or None
-                    })
-                    log.debug(f"  SUCCESS: Added GitHub account for validation: Name='{name_check_value}'")
-                else:
-                    log.warning(f"  SKIPPED: GitHub account at index {index} due to missing or empty 'NAME' or 'TOKEN'. Name_IsSet: {bool(name_check_value)}, Token_IsSet: {bool(token_check_value)}. Found keys: {list(account_data.keys())}")
-
-            # Add debug logging as per Step 1, Mod 2
-            log.debug(f"Final github_accounts_data list prepared for Pydantic: {len(github_accounts_data)} item(s)")
-            for i, account_dict_item in enumerate(github_accounts_data):
-                 _acc_token_val_l473 = account_dict_item.get('token') # account_dict_item is a dict here, token could be None
-                 _acc_token_for_log_len_l473 = _acc_token_val_l473 if isinstance(_acc_token_val_l473, str) else ""
-                 log.debug(f"  Account {i+1} data: name='{account_dict_item.get('name')}', token_length={len(_acc_token_for_log_len_l473)}, base_url='{account_dict_item.get('base_url')}'")
-
-            # Add the constructed list to the dictionary Pydantic will validate
-            # Use the CLASS FIELD NAME ('github_accounts'), not the alias, for assignment before validation
-            # This list of dictionaries is passed to Pydantic's AppSettings.model_validate
-            # where each dictionary will be validated against the GitHubAccountConfig model.
-            cleaned_env_dict['github_accounts'] = github_accounts_data
-            log.debug(f"Assigned github_accounts key to cleaned_env_dict. Type: {type(cleaned_env_dict['github_accounts'])}, Count: {len(cleaned_env_dict['github_accounts'])}")
-
-
-            # Add assertion as per Step 1, Testing
-            # Note: This might fail if no GitHub accounts are configured, which is valid.
-            # Consider if this assertion should only run if GITHUB_DEFAULT_ACCOUNT_NAME is set.
-            # For now, keeping it simple as per the report.
-            if os.environ.get("GITHUB_DEFAULT_ACCOUNT_NAME"):
-                 # Only assert if a default is expected to exist
-                 assert len(github_accounts_data) > 0, "GITHUB_DEFAULT_ACCOUNT_NAME is set, but no GitHub accounts were successfully extracted from environment variables"
-
-            # --- Pydantic Validation ---
-            # Pydantic now loads and validates settings from the prepared dictionary
-            log.info("Starting Pydantic validation with prepared dictionary...")
-            log.debug(f"Keys in cleaned_env_dict for Pydantic: {list(cleaned_env_dict.keys())}")
-            log.debug(f"MICROSOFT_APP_ID in cleaned_env_dict: {'MICROSOFT_APP_ID' in cleaned_env_dict}")
-            log.debug(f"Value of MICROSOFT_APP_ID if present: {cleaned_env_dict.get('MICROSOFT_APP_ID')}")
-            
-            # CRITICAL DEBUG: Log github_accounts data before validation
-            log.debug(f"CRITICAL DEBUG - github_accounts before validation: {cleaned_env_dict.get('github_accounts')}")
-            log.debug(f"CRITICAL DEBUG - github_accounts type: {type(cleaned_env_dict.get('github_accounts'))}")
-            log.debug(f"CRITICAL DEBUG - github_accounts count: {len(cleaned_env_dict.get('github_accounts', []))}")
-            
-            self.settings = AppSettings.model_validate(cleaned_env_dict)
-            log.info("Pydantic settings loaded and validated successfully.")
-            
-            # CRITICAL DEBUG: Log github_accounts after validation  
-            log.debug(f"CRITICAL DEBUG - github_accounts after validation: {self.settings.github_accounts}")
-            log.debug(f"CRITICAL DEBUG - github_accounts count after validation: {len(self.settings.github_accounts)}")
-
-            # Add assertion as per Step 1, Testing
-            if os.environ.get("GITHUB_DEFAULT_ACCOUNT_NAME"):
-                # Assert that after validation, accounts exist if a default is specified
-                assert len(self.settings.github_accounts) > 0, "GITHUB_DEFAULT_ACCOUNT_NAME is set, but GitHub accounts list is empty after Pydantic validation"
-
-
-            # Debug logs to check values loaded by Pydantic
-            log.debug(f"Pydantic loaded settings:")
-            log.debug(f"CRITICAL DEBUG - Debug logging check: github_accounts = {self.settings.github_accounts}")
-            log.debug(f"CRITICAL DEBUG - Debug logging check: len(github_accounts) = {len(self.settings.github_accounts)}")
-            log.debug(f"CRITICAL DEBUG - Debug logging check: bool(github_accounts) = {bool(self.settings.github_accounts)}")
-            log.debug(f"CRITICAL DEBUG - Debug logging check: type(github_accounts) = {type(self.settings.github_accounts)}")
-            if self.settings.github_accounts:
-                 log.debug(f"  settings.github_accounts:")
-                 for i, raw_account_config in enumerate(self.settings.github_accounts):
-                     typed_account_config: GitHubAccountConfig = cast(GitHubAccountConfig, raw_account_config)
-                     log.debug(f"    [{i}] Name: {typed_account_config.name}, Token: {'***' if typed_account_config.token else 'None'}, Base URL: {typed_account_config.base_url}")
-                 log.debug(f"  settings.github_default_account_name: {self.settings.github_default_account_name}")
-            else:
-                 log.debug(f"  github_accounts is falsy: {self.settings.github_accounts}")
-
-            # Now that validation is done, setup logging properly based on the validated setting - REMOVED
-            # self._setup_logging() # Re-run with validated settings
-
-            log.info("Configuration loaded and validated successfully (config.py).")
-            log.info(f"App Environment: {self.settings.app_env}")
-            log.info(f"Log Level: {self.settings.log_level}") # Should now reflect validated level
-            log.info(f"Default Gemini Model: {self.settings.gemini_model}")
-            log.info(f"Available Personas: {self.AVAILABLE_PERSONAS}")
-            log.info(f"Default Persona: {self.DEFAULT_PERSONA}")
-        except ValidationError as e:
-            log.critical(f"CRITICAL: Configuration validation failed:\n{e}", exc_info=False)
-            if "gemini_api_key" in str(e).lower():
-                 log.critical("Ensure GEMINI_API_KEY is set correctly in your .env file.")
-            # Exit if critical config is missing
-            raise ValueError(f"Configuration errors: {e}") from e
-        except Exception as e:
-            log.critical(f"CRITICAL: An unexpected error occurred during configuration loading: {e}", exc_info=True)
-            raise RuntimeError(f"Failed to initialize configuration: {e}") from e
+    model_config = ConfigDict(
+        env_file_encoding='utf-8',
+        extra='ignore',
+        # Enable environment variable loading for BaseSettings
+        env_prefix='',
+        case_sensitive=False,
+        validate_default=True,
+        use_enum_values=True
+    )
 
     def get_env_value(self, env_name: str) -> Optional[str]:
-        """
-        Retrieves environment variables preferentially from validated Pydantic settings.
-        Falls back to os.environ for variables not explicitly in the model.
-        Handles potential parsing of complex types back to string.
-        """
-        # Prioritize validated Pydantic settings
+        # Ensure settings are loaded if accessed directly before full __init__ (less common)
+        if not hasattr(self, 'settings') and hasattr(self, '_config_instance') and self._config_instance is not None and hasattr(self._config_instance, 'settings'):
+             self.settings = self._config_instance.settings
+        
         if hasattr(self, 'settings'):
-            # Find the field name corresponding to the alias (env_name)
             field_name = None
+            # Check Pydantic field aliases first
             for name, field_info in self.settings.model_fields.items():
-                # Handle potential alias difference (e.g., GITHUB_TOKEN vs github_token field)
-                # Check both alias and direct field name match (prefer alias)
-                if field_info.alias == env_name:
+                if hasattr(field_info, 'alias') and field_info.alias == env_name:
                     field_name = name
                     break
-                elif name == env_name.lower(): # Fallback for direct match if no alias found
-                     field_name = name
-                     # Don't break here, alias match is preferred
-
+            
+            # If not found by alias, check direct attribute name (case-insensitive for env var style)
+            if not field_name:
+                for name in self.settings.model_fields.keys():
+                    if name.lower() == env_name.lower():
+                        field_name = name
+                        break
+            
             if field_name and hasattr(self.settings, field_name):
                 setting_value = getattr(self.settings, field_name)
                 if setting_value is not None:
-                    # Handle lists (like github_accounts) - maybe return count or specific value?
-                    # For now, just indicate presence for simple checks (is_tool_configured)
+                    # For lists (like github_accounts), consider it "set" if the list is not empty
                     if isinstance(setting_value, list):
-                         log.debug(f"Found list setting '{field_name}' for ENV var '{env_name}' (Count: {len(setting_value)})")
-                         # Return something truthy if non-empty, or None if empty?
-                         # This function is often used for boolean checks (is_tool_configured)
-                         return str(len(setting_value)) if setting_value else None # Indicate presence/count
-                    # Convert complex types like HttpUrl to string
-                    elif hasattr(setting_value, '__str__') and not isinstance(setting_value, str):
-                         log.debug(f"Found setting '{field_name}' for ENV var '{env_name}', returning string representation.")
+                        return str(len(setting_value)) if setting_value else None 
+                    # For Pydantic models or other complex types, __str__ might be too verbose or not indicative of "set"
+                    # For HttpUrl etc., str(setting_value) is fine.
+                    elif hasattr(setting_value, '__str__') and isinstance(setting_value, (str, int, float, bool, HttpUrl, EmailStr)):
                          return str(setting_value)
-                    else:
-                         log.debug(f"Found setting '{field_name}' for ENV var '{env_name}'")
-                         return setting_value # Return primitive types directly
-
-        # Fallback to raw os.environ if not found in validated settings
-        # (Useful for vars not modeled in AppSettings but needed elsewhere)
-        direct_value = os.environ.get(env_name)
-        if direct_value is not None: # Check for None explicitly, empty string is valid value
-            log.debug(f"Found environment variable {env_name} directly in os.environ (not via settings model).")
-            # Return the raw value - assume downstream handles cleaning if needed
-            return direct_value
-
-        log.warning(f"Environment variable {env_name} not found in Pydantic settings or os.environ.")
-        return None
+                    elif isinstance(setting_value, (str, int, float, bool)): # Basic types already covered but good fallback
+                        return str(setting_value)
+                    # If it's a complex object not covered above, and we just need to check existence,
+                    # its presence means it's "set". Returning a placeholder.
+                    return "OBJECT_PRESENT" 
         
-    def is_tool_configured(self, tool_key: str) -> bool:
-        """
-        Check if a tool has its required configuration available.
-        Special handling for 'github'.
-        """
-        tool_key_lower = tool_key.lower()
+        # Fallback to direct os.environ.get if not found in Pydantic settings
+        # This is less common if all configs are routed via AppSettings
+        direct_value = os.environ.get(env_name)
+        if direct_value is not None:
+            log.debug(f"Env var {env_name} found directly in os.environ (value: '{direct_value[:20]}...').")
+            return direct_value
+        
+        # log.debug(f"Env var or Pydantic setting {env_name} not found or has no value.")
+        return None
 
-        # Initialize cache if it doesn't exist
+    def is_tool_configured(self, tool_name: str, categories: Optional[List[str]] = None) -> bool:
+        tool_name_lower = tool_name.lower()
         if not hasattr(self, '_tool_validation_cache'):
             self._tool_validation_cache = {}
-        if tool_key_lower in self._tool_validation_cache:
-            return self._tool_validation_cache[tool_key_lower]
+        
+        cache_key = tool_name_lower # Simple cache key for now
+        if cache_key in self._tool_validation_cache:
+            return self._tool_validation_cache[cache_key]
 
-        # Initialize health status cache if it doesn't exist
         if not hasattr(self, '_tool_health_status'):
             self._tool_health_status = {}
+
+        if tool_name_lower in self._tool_health_status and self._tool_health_status[tool_name_lower] == 'DOWN':
+            log.warning(f"Tool '{tool_name}' marked DOWN by health check. Considering NOT configured.")
+            self._tool_validation_cache[cache_key] = False
+            return False
 
         is_configured = False # Default to False
+        processed_categories = [cat.lower() for cat in categories] if categories else []
 
-        # Check for health status override
-        if tool_key_lower in self._tool_health_status:
-            health_status = self._tool_health_status[tool_key_lower]
-            if health_status == 'DOWN':
-                log.warning(f"Tool '{tool_key}' is marked as DOWN by health check. Considering as not configured.")
-                is_configured = False
-                self._tool_validation_cache[tool_key_lower] = is_configured
-                return is_configured
+        # 1. GitHub specific check (due to complex structure of github_accounts)
+        if "github" in processed_categories or "github" in tool_name_lower:
+            # Assuming self.settings is the loaded AppSettings instance
+            is_configured = bool(self.github_accounts and any(acc.token for acc in self.github_accounts))
+            log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) GitHub check: configured = {is_configured}")
+            self._tool_validation_cache[cache_key] = is_configured
+            return is_configured
 
-        # --- Special handling for GitHub ---
-        if tool_key_lower == 'github':
-            if self.settings.github_accounts:
-                 log.info("Tool 'github' is configured: Found at least one account in settings.github_accounts.")
-                 is_configured = True
-            else:
-                 log.warning("Tool 'github' is NOT configured: settings.github_accounts is empty.")
-                 is_configured = False
-
-        # --- Standard handling for other tools ---
-        elif tool_key_lower in self.TOOL_CONFIG_REQUIREMENTS:
-            required_vars = self.TOOL_CONFIG_REQUIREMENTS[tool_key_lower]
-            log.debug(f"Validating config for tool '{tool_key}'. Required ENV vars: {required_vars}")
-
-            all_found = True
+        # 2. Check services defined in TOOL_CONFIG_REQUIREMENTS based on categories or tool name
+        service_to_check = None
+        for service_key in TOOL_CONFIG_REQUIREMENTS.keys(): # Access global directly
+            if service_key in processed_categories:
+                service_to_check = service_key
+                break
+            if not service_to_check and service_key in tool_name_lower: # Fallback if category not specific
+                service_to_check = service_key
+        
+        if service_to_check:
+            required_vars = TOOL_CONFIG_REQUIREMENTS[service_to_check] # Access global directly
             missing_vars = []
-            for env_var_name in required_vars:
-                val = self.get_env_value(env_var_name)
-                if not val: # Checks for None or empty string
+            all_found = True
+            for var_key in required_vars:
+                pydantic_attr_name = var_key.lower() # Simple conversion
+                # Assuming self.settings is the loaded AppSettings instance
+                if hasattr(self, pydantic_attr_name): # Check directly on self (AppSettings instance)
+                    if not getattr(self, pydantic_attr_name):
+                        all_found = False
+                        missing_vars.append(var_key)
+                else: 
                     all_found = False
-                    missing_vars.append(env_var_name)
-                    log.warning(f"Tool '{tool_key}': Missing required variable: {env_var_name}")
-                else:
-                    log.debug(f"Tool '{tool_key}': Found required variable: {env_var_name}")
+                    missing_vars.append(f"{var_key} (attribute not found in AppSettings)")
 
             if all_found:
-                log.info(f"Tool '{tool_key}' is properly configured.")
                 is_configured = True
             else:
-                log.warning(f"Tool '{tool_key}' is NOT configured correctly. Missing: {missing_vars}")
-                is_configured = False
-        
-        # --- Tool not in requirements ---
-        else:
-            log.warning(f"Tool '{tool_key}' has no defined configuration requirements in TOOL_CONFIG_REQUIREMENTS. Assuming NOT configured.")
-            is_configured = False # Safer default if requirements aren't listed
+                log.warning(f"Tool '{tool_name}' (service: {service_to_check}, categories: {processed_categories}) NOT configured. Missing Pydantic settings: {missing_vars}")
+            
+            log.debug(f"Tool '{tool_name}' (service: {service_to_check}) check: configured = {is_configured}")
+            self._tool_validation_cache[cache_key] = is_configured
+            return is_configured
 
-        # Cache and return the result
-        self._tool_validation_cache[tool_key_lower] = is_configured
+        # 3. If no specific service category requiring config matched, assume it's a core/dependency-free tool.
+        is_configured = True 
+        log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) did not match specific service config checks. Assuming configured (e.g., core tool). Status: {is_configured}")
+        
+        self._tool_validation_cache[cache_key] = is_configured
         return is_configured
 
-    def update_tool_health_status(self, tool_key: str, status: str) -> None:
+
+class Config:
+    """
+    Main configuration class that wraps AppSettings and provides a unified interface
+    for accessing all application configuration values.
+    """
+    
+    def __init__(self, env_file: Optional[str] = None):
         """
-        Update the health status for a tool.
-        This allows health check results to influence the is_tool_configured method.
+        Initialize Config by loading environment variables and validating settings.
         
         Args:
-            tool_key: The tool key (e.g., 'github', 'greptile')
-            status: The health status ('OK', 'DOWN', etc.)
+            env_file: Optional path to a .env file to load
         """
-        if not hasattr(self, '_tool_health_status'):
-            self._tool_health_status = {}
-            
-        tool_key_lower = tool_key.lower()
-        self._tool_health_status[tool_key_lower] = status
+        # Load environment variables from .env file if provided or found
+        if env_file:
+            load_dotenv(env_file)
+        else:
+            # Try to find a .env file in common locations
+            env_path = find_dotenv()
+            if env_path:
+                load_dotenv(env_path)
+                log.info(f"Loaded environment variables from: {env_path}")
+            else:
+                log.info("No .env file found, using system environment variables only")
         
-        # Clear validation cache for this tool
-        if hasattr(self, '_tool_validation_cache') and tool_key_lower in self._tool_validation_cache:
-            del self._tool_validation_cache[tool_key_lower]
-            
-        log.info(f"Updated health status for tool '{tool_key}': {status}")
+        # Load GitHub account configurations from environment variables
+        github_accounts = self._load_github_accounts()
         
-    def get_configuration_summary(self) -> Dict[str, bool]:
-        """
-        Returns a dictionary of critical tools and their configuration status.
-        """
-        summary = {}
-        for tool_key in self.TOOL_CONFIG_REQUIREMENTS.keys():
-            summary[tool_key] = self.is_tool_configured(tool_key)
-        return summary
-
-    @property
-    def APP_ENV(self) -> Literal["development", "production"]:
-        return self.settings.app_env
-
-    @property
-    def PORT(self) -> int:
-        return self.settings.port
-
-    @property
-    def LOG_LEVEL(self) -> str:
-        return self.settings.log_level
-
-    @property
-    def GEMINI_API_KEY(self) -> str:
-        if not self.settings.gemini_api_key:
-             raise ValueError("GEMINI_API_KEY is not set in the configuration.")
-        return self.settings.gemini_api_key
-
-    @property
-    def GEMINI_MODEL(self) -> str:
-        return self.settings.gemini_model
-
-    @property
-    def JIRA_API_URL(self) -> Optional[HttpUrl]:
-        return self.settings.jira_api_url
-
-    @property
-    def JIRA_API_EMAIL(self) -> Optional[EmailStr]:
-        return self.settings.jira_api_email
-
-    @property
-    def JIRA_API_TOKEN(self) -> Optional[str]:
-        return self.settings.jira_api_token
-
-    @property
-    def JIRA_DEFAULT_PROJECT_KEY(self) -> str:
-        return self.settings.jira_default_project_key
+        # Initialize the Pydantic settings model
+        try:
+            # Create a temporary dict to pass github_accounts to the model
+            # while still allowing BaseSettings to read from environment
+            extra_data = {"github_accounts": github_accounts}
+            self.settings = AppSettings(**extra_data)
+            log.info("✅ Configuration loaded successfully")
+        except ValidationError as e:
+            log.error(f"❌ Configuration validation failed: {e}")
+            raise
+        except Exception as e:
+            log.error(f"❌ Failed to initialize configuration: {e}")
+            raise
+        
+        # Set up computed properties
+        self._setup_computed_properties()
+        
+        # Log configuration summary
+        self._log_config_summary()
     
-    @property
-    def JIRA_DEFAULT_ISSUE_TYPE(self) -> str:
-        return self.settings.jira_default_issue_type
-
-    @property
-    def GREPTILE_API_KEY(self) -> Optional[str]:
-        return self.settings.greptile_api_key
-
-    @property
-    def GREPTILE_API_URL(self) -> HttpUrl:
-        return self.settings.greptile_api_url
-
-    @property
-    def GREPTILE_DEFAULT_REPO(self) -> Optional[str]:
-        return self.settings.greptile_default_repo
-
-    @property
-    def PERPLEXITY_API_KEY(self) -> Optional[str]:
-        return self.settings.perplexity_api_key
-
-    @property
-    def PERPLEXITY_API_URL(self) -> HttpUrl:
-        return self.settings.perplexity_api_url
-
-    @property
-    def PERPLEXITY_MODEL(self) -> str:
-        return self.settings.perplexity_model
-
-    @property
-    def SYSTEM_PROMPT(self) -> str:
-        return self.settings.system_prompt if self.settings.system_prompt != "DEFAULT_SYSTEM_PROMPT_PLACEHOLDER" else DEFAULT_SYSTEM_PROMPT
-
-    @property
-    def MAX_CONSECUTIVE_TOOL_CALLS(self) -> int:
-        return self.settings.max_consecutive_tool_calls
-
-    @property
-    def DEFAULT_API_TIMEOUT_SECONDS(self) -> int:
-        return self.settings.default_api_timeout_seconds
-
-    @property
-    def DEFAULT_API_MAX_RETRIES(self) -> int:
-        return self.settings.default_api_max_retries
-
-    @property
-    def BREAK_ON_CRITICAL_TOOL_ERROR(self) -> bool:
-        return self.settings.break_on_critical_tool_error
-
-    @property
-    def LLM_MAX_HISTORY_ITEMS(self) -> int:
-        return self.settings.llm_max_history_items
-
-    @property
-    def TOOLS(self) -> Dict[str, Any]:
-        """Fallback for tools configuration used in test/demo contexts."""
-        return {} # Empty dict as a safe fallback
-
-    @property
-    def MOCK_MODE(self) -> bool:
-        """Whether mock mode is enabled for API responses."""
-        return self.settings.mock_mode
-
-    @property
-    def GENERAL_SYSTEM_PROMPT(self) -> str:
-        """Returns the default system prompt for testing compatibility."""
-        return self.DEFAULT_SYSTEM_PROMPT
+    def _load_github_accounts(self) -> List[GitHubAccountConfig]:
+        """Load GitHub account configurations from environment variables."""
+        accounts = []
+        account_index = 1
         
-    @GENERAL_SYSTEM_PROMPT.setter
-    def GENERAL_SYSTEM_PROMPT(self, value: str) -> None:
-        """Set the default system prompt. Used primarily for testing."""
-        self.DEFAULT_SYSTEM_PROMPT = value
-
-    @property
-    def MAX_HISTORY_MESSAGES(self) -> int:
-        """Alias for LLM_MAX_HISTORY_ITEMS, used for backward compatibility."""
-        return self.settings.llm_max_history_items
+        while True:
+            # Look for GITHUB_ACCOUNT_n_TOKEN and GITHUB_ACCOUNT_n_NAME
+            token_env = f"GITHUB_ACCOUNT_{account_index}_TOKEN"
+            name_env = f"GITHUB_ACCOUNT_{account_index}_NAME"
+            base_url_env = f"GITHUB_ACCOUNT_{account_index}_BASE_URL"
+            
+            token = os.getenv(token_env)
+            name = os.getenv(name_env)
+            
+            if not token or not name:
+                # No more accounts found
+                break
+            
+            try:
+                account_config = GitHubAccountConfig(
+                    name=name,
+                    token=token,
+                    base_url=os.getenv(base_url_env) if os.getenv(base_url_env) else None
+                )
+                accounts.append(account_config)
+                log.debug(f"Loaded GitHub account config: {name}")
+            except ValidationError as e:
+                log.warning(f"Invalid GitHub account config for {name}: {e}")
+            
+            account_index += 1
         
-    @MAX_HISTORY_MESSAGES.setter
-    def MAX_HISTORY_MESSAGES(self, value: int) -> None:
-        """Setter for MAX_HISTORY_MESSAGES to support testing."""
-        self.settings.llm_max_history_items = value
-
+        if accounts:
+            log.info(f"Loaded {len(accounts)} GitHub account configurations")
+        else:
+            log.info("No GitHub account configurations found")
+        
+        return accounts
+    
+    def _setup_computed_properties(self):
+        """Set up computed properties and convenience attributes."""
+        # Database path property
+        self.STATE_DB_PATH = self.settings.state_db_path
+        
+        # Core API settings
+        self.GEMINI_API_KEY = self.settings.gemini_api_key
+        self.GEMINI_MODEL = self.settings.gemini_model
+        self.DEFAULT_SYSTEM_PROMPT = self.settings.system_prompt
+        self.DEFAULT_API_TIMEOUT_SECONDS = self.settings.default_api_timeout_seconds
+        self.DEFAULT_API_MAX_RETRIES = self.settings.default_api_max_retries
+        
+        # LLM settings
+        self.LLM_MAX_HISTORY_ITEMS = self.settings.llm_max_history_items
+        self.MAX_CONSECUTIVE_TOOL_CALLS = self.settings.max_consecutive_tool_calls
+        
+        # Bot Framework settings
+        self.MICROSOFT_APP_ID = self.settings.MicrosoftAppId
+        self.MICROSOFT_APP_PASSWORD = self.settings.MicrosoftAppPassword
+        self.MICROSOFT_APP_TYPE = self.settings.MicrosoftAppType
+        
+        # Admin settings
+        self.ADMIN_USER_ID = self.settings.admin_user_id
+        self.ADMIN_USER_NAME = self.settings.admin_user_name
+        self.ADMIN_USER_EMAIL = self.settings.admin_user_email
+        
+        # Security settings
+        self.SECURITY_RBAC_ENABLED = self.settings.security_rbac_enabled
+        
+        # Persona settings (compatibility with existing code)
+        self.AVAILABLE_PERSONAS = AVAILABLE_PERSONAS
+        self.DEFAULT_PERSONA = DEFAULT_PERSONA
+        
+        # Tool configuration limits and optimizations
+        self.MAX_FUNCTION_DECLARATIONS = 12  # Reasonable default for LLM tool limits
+        self.SCHEMA_OPTIMIZATION = {
+            "max_tool_schema_properties": 15,
+            "max_tool_description_length": 200,
+            "max_tool_enum_values": 10,
+            "max_nested_object_properties": 8,
+            "max_array_item_properties": 6,
+            "flatten_nested_objects": False
+        }
+        
+        # Tool Selector configuration
+        self.TOOL_SELECTOR = {
+            "enabled": True,
+            "similarity_threshold": 0.3,
+            "max_tools": 15,
+            "always_include_tools": [],
+            "debug_logging": False,
+            "default_fallback": True,
+            "cache_path": os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data",
+                "tool_embeddings.json"
+            ),
+            "auto_save_interval_seconds": 300,
+            "rebuild_cache_on_startup": False,
+            "embedding_model": "all-MiniLM-L6-v2"
+        }
+        
+        # Persona system prompts (if needed in the future)
+        self.PERSONA_SYSTEM_PROMPTS = {
+            "Default": self.DEFAULT_SYSTEM_PROMPT,
+            "Concise Communicator": self.DEFAULT_SYSTEM_PROMPT + "\n\nPlease be concise and direct in your responses.",
+            "Detailed Explainer": self.DEFAULT_SYSTEM_PROMPT + "\n\nPlease provide detailed explanations and context.",
+            "Code Reviewer": self.DEFAULT_SYSTEM_PROMPT + "\n\nFocus on code quality, best practices, and detailed technical analysis."
+        }
+    
+    def _log_config_summary(self):
+        """Log a summary of the loaded configuration."""
+        log.info("=== Configuration Summary ===")
+        log.info(f"Environment: {self.settings.app_env}")
+        log.info(f"Port: {self.settings.port}")
+        log.info(f"Log Level: {self.settings.log_level}")
+        log.info(f"Database: {self.STATE_DB_PATH}")
+        log.info(f"LLM Model: {self.GEMINI_MODEL}")
+        log.info(f"Memory Type: {self.settings.memory_type}")
+        
+        # Security
+        log.info(f"RBAC Enabled: {self.SECURITY_RBAC_ENABLED}")
+        if self.ADMIN_USER_ID:
+            log.info(f"Admin User: {self.ADMIN_USER_ID}")
+        
+        # Services
+        configured_services = []
+        if self.settings.github_accounts:
+            configured_services.append(f"GitHub ({len(self.settings.github_accounts)} accounts)")
+        if self.settings.jira_api_url and self.settings.jira_api_token:
+            configured_services.append("Jira")
+        if self.settings.greptile_api_key:
+            configured_services.append("Greptile")
+        if self.settings.perplexity_api_key:
+            configured_services.append("Perplexity")
+        
+        if configured_services:
+            log.info(f"Configured Services: {', '.join(configured_services)}")
+        else:
+            log.info("No external services configured")
+        
+        log.info("=============================")
+    
+    def is_tool_configured(self, tool_name: str, categories: Optional[List[str]] = None) -> bool:
+        """
+        Check if a tool is properly configured.
+        Delegates to the AppSettings method.
+        """
+        return self.settings.is_tool_configured(tool_name, categories)
+    
+    def get_env_value(self, env_name: str) -> Optional[str]:
+        """
+        Get an environment variable value.
+        Delegates to the AppSettings method.
+        """
+        return self.settings.get_env_value(env_name)
+    
+    def health_check(self) -> Dict[str, Any]:
+        """
+        Perform a health check on the configuration.
+        """
+        try:
+            issues = []
+            
+            # Check critical settings
+            if not self.GEMINI_API_KEY:
+                issues.append("GEMINI_API_KEY not configured")
+            
+            # Check database path accessibility
+            try:
+                db_dir = os.path.dirname(os.path.abspath(self.STATE_DB_PATH))
+                if not os.path.exists(db_dir):
+                    os.makedirs(db_dir, exist_ok=True)
+                # Try to create/access the database file
+                test_db_path = os.path.join(db_dir, "config_health_test.tmp")
+                with open(test_db_path, 'w') as f:
+                    f.write("test")
+                os.remove(test_db_path)
+            except Exception as e:
+                issues.append(f"Database path not accessible: {e}")
+            
+            if issues:
+                return {
+                    "status": "WARN",
+                    "message": f"Configuration issues: {'; '.join(issues)}",
+                    "component": "Config"
+                }
+            else:
+                return {
+                    "status": "OK",
+                    "message": "Configuration healthy",
+                    "component": "Config"
+                }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "message": f"Configuration health check failed: {e}",
+                "component": "Config"
+            }
+    
     def get_system_prompt(self, persona_name: str = "Default") -> str:
         """
-        Returns the appropriate system prompt for the given persona.
+        Get the system prompt for the specified persona.
         
         Args:
-            persona_name: The name of the requested persona (e.g., "Default", "Concise Communicator")
+            persona_name: The name of the persona to get the system prompt for.
             
         Returns:
-            str: The system prompt for the requested persona.
+            The system prompt for the specified persona.
         """
-        # If specific personas are defined, use those
-        if persona_name and persona_name in self.AVAILABLE_PERSONAS:
-            # Get persona-specific prompt if it exists, else use default
-            persona_key = f"SYSTEM_PROMPT_{persona_name.upper().replace(' ', '_')}"
-            if hasattr(self, persona_key):
-                return getattr(self, persona_key)
+        if not persona_name or not isinstance(persona_name, str):
+            log.warning(f"Invalid persona name provided: {persona_name}. Using default system prompt.")
+            return self.DEFAULT_SYSTEM_PROMPT
         
-        # Default to the standard system prompt
-        return self.SYSTEM_PROMPT
+        if hasattr(self, 'PERSONA_SYSTEM_PROMPTS') and isinstance(self.PERSONA_SYSTEM_PROMPTS, dict):
+            prompt = self.PERSONA_SYSTEM_PROMPTS.get(persona_name)
+            if prompt:
+                log.debug(f"Using system prompt for persona: {persona_name}")
+                return prompt
+        
+        log.warning(f"No system prompt found for persona: {persona_name}. Using default.")
+        return self.DEFAULT_SYSTEM_PROMPT
 
-    def get_github_config(self, name: Optional[str] = None) -> Optional[GitHubAccountConfig]:
-        """
-        Retrieves a specific GitHub account configuration by name, or the default one.
 
-        Args:
-            name: The name of the GitHub account config to retrieve.
-                  If None, retrieves the default account specified by
-                  GITHUB_DEFAULT_ACCOUNT_NAME, or the first account if no
-                  default is set but accounts exist.
-
-        Returns:
-            The matching GitHubAccountConfig object, or None if not found.
-        """
-        if not self.settings.github_accounts:
-            log.warning("get_github_config called, but no GitHub accounts are configured.")
-            return None
-
-        target_name = name or self.settings.github_default_account_name
-
-        if target_name:
-            for account in self.settings.github_accounts:
-                if account.name == target_name:
-                    log.debug(f"Found GitHub config for name: '{target_name}'")
-                    return account
-            log.warning(f"GitHub config requested for name '{target_name}', but not found.")
-            # If a specific name was requested and not found, return None
-            if name:
-                 return None
-            # If default was requested but not found, fall through to grabbing the first one
-
-        # If no specific name requested AND default name wasn't found or wasn't set, return the first account
-        if not target_name and self.settings.github_accounts:
-             log.debug("No specific or default GitHub name specified/found, returning the first configured account.")
-             return self.settings.github_accounts[0]
-
-        # If we get here, a default name was specified but not found
-        log.error(f"Default GitHub account '{self.settings.github_default_account_name}' not found in configured accounts.")
-        return None # Or raise an error? Let's return None for now.
-
-    @property
-    def STATE_DB_PATH(self) -> str:
-        return self.settings.state_db_path
-
-    @property 
-    def ADMIN_USER_ID(self) -> Optional[str]:
-        return self.settings.admin_user_id
-    
-    @property
-    def ADMIN_USER_NAME(self) -> Optional[str]:
-        return self.settings.admin_user_name
-    
-    @property  
-    def ADMIN_USER_EMAIL(self) -> Optional[str]:
-        return self.settings.admin_user_email
-
-# --- Initialize and Export Singleton Instance ---
-# This ensures the configuration is loaded and validated once when the module is imported.
-
-# Global singleton instance
+# Global configuration instance
 _config_instance: Optional[Config] = None
+_config_lock = threading.Lock()
 
-def get_config() -> Config:
+
+def get_config(env_file: Optional[str] = None, force_reload: bool = False) -> Config:
     """
-    Returns the singleton Config instance, initializing it if necessary.
-    This prevents duplicate initialization across imports.
+    Get the global configuration instance (singleton pattern).
+    
+    Args:
+        env_file: Optional path to a .env file to load (only used on first initialization)
+        force_reload: Force reloading the configuration (useful for testing)
+        
+    Returns:
+        The global Config instance
     """
     global _config_instance
-    if _config_instance is None:
-        log.info("Initializing singleton Config instance...")
-        _config_instance = Config()
-        log.info("Singleton Config instance created.")
-    return _config_instance
+    
+    with _config_lock:
+        if _config_instance is None or force_reload:
+            try:
+                _config_instance = Config(env_file=env_file)
+                log.info("✅ Global configuration instance initialized")
+            except Exception as e:
+                log.error(f"❌ Failed to initialize global configuration: {e}")
+                raise
+        
+        return _config_instance
 
-# For backward compatibility with direct imports
-# CONFIG = get_config()
+
+def reload_config(env_file: Optional[str] = None) -> Config:
+    """
+    Force reload the global configuration instance.
+    Useful when environment variables have changed.
+    
+    Args:
+        env_file: Optional path to a .env file to load
+        
+    Returns:
+        The newly reloaded Config instance
+    """
+    return get_config(env_file=env_file, force_reload=True)
+

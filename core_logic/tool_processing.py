@@ -17,7 +17,7 @@ import sys # Ensure sys is at the top of standard imports
 import os
 from importlib import import_module
 
-print(f"DEBUG: sys.path in {__file__} BEFORE robust path setup: {sys.path}") # ADDED FOR DEBUGGING
+# print(f"DEBUG: sys.path in {__file__} BEFORE robust path setup: {sys.path}") # ADDED FOR DEBUGGING
 # --- Robust Path Setup for this file ---
 _tool_processing_file_path_for_path_setup = os.path.abspath(__file__)
 _core_logic_dir_from_tp_for_path_setup = os.path.dirname(_tool_processing_file_path_for_path_setup)
@@ -25,7 +25,7 @@ _project_root_dir_from_tp_for_path_setup = os.path.dirname(_core_logic_dir_from_
 
 if _project_root_dir_from_tp_for_path_setup not in sys.path:
     sys.path.insert(0, _project_root_dir_from_tp_for_path_setup)
-    print(f"DEBUG: sys.path in {__file__} AFTER robust path setup: {sys.path}") # ADDED FOR DEBUGGING
+# print(f"DEBUG: sys.path in {__file__} AFTER robust path setup: {sys.path}") # ADDED FOR DEBUGGING
 # --- End Robust Path Setup ---
 
 # Project-specific imports (NOW ATTEMPT AFTER PATH IS SET)
@@ -46,8 +46,15 @@ from .constants import (
     MAX_RETRY_DELAY,
 )
 
-print(f"DEBUG: sys.path in {__file__} BEFORE importing utils.logging_config: {sys.path}") # ADDED FOR DEBUGGING
-from utils.logging_config import get_logger # Import the new logger
+# print(f"DEBUG: sys.path in {__file__} BEFORE importing utils.logging_config: {sys.path}") # ADDED FOR DEBUGGING
+from utils.logging_config import get_logger, setup_logging, start_new_turn, clear_turn_ids
+
+try:
+    from jsonschema import validate as validate_schema
+    from jsonschema.exceptions import ValidationError as SchemaValidationError
+    JSONSCHEMA_AVAILABLE = True
+except ImportError:
+    JSONSCHEMA_AVAILABLE = False
 
 log = get_logger("core_logic.tool_processing") # Use namespaced logger
 
@@ -230,18 +237,6 @@ async def _execute_tool_calls(
                     }
                 )
                 args_dict_for_processing = {"__tool_arg_error__": "JSONDecodeError", "message": str(e), "raw_arguments": effective_args_json_str_for_log_hash}
-
-        # --- START Parameter Injection for jira_get_issues_by_user ---
-        if function_name == "jira_get_issues_by_user":
-            if not args_dict_for_processing.get("user_email"):
-                if app_state.current_user and app_state.current_user.email:
-                    log.info(f"Injecting current user's email ({app_state.current_user.email}) into call for tool '{function_name}' (ID: {tool_call_id}).")
-                    args_dict_for_processing["user_email"] = app_state.current_user.email
-                    # Update the JSON string if it's used later for hashing or logging, though validation uses the dict
-                    effective_args_json_str_for_log_hash = json.dumps(args_dict_for_processing)
-                else:
-                    log.warning(f"Tool '{function_name}' (ID: {tool_call_id}) requires 'user_email', but it's missing and current user's email is not available in app_state.")
-        # --- END Parameter Injection ---
 
         log.info(
             "Preparing to execute tool.",
@@ -544,7 +539,7 @@ def _validate_tool_parameters(
     available_tool_definitions: List[Dict[str, Any]]
 ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     """
-    Validates tool function arguments against the tool's parameter schema.
+    Validates tool function arguments against the tool's parameter schema using jsonschema.
 
     Args:
         function_name: The name of the tool to validate arguments for
@@ -555,154 +550,92 @@ def _validate_tool_parameters(
         Tuple containing:
         - Boolean indicating if validation passed
         - Error message string if validation failed, None otherwise
-        - Dictionary with validated/transformed arguments (might include
-          defaults or type conversions)
+        - Dictionary with original arguments (jsonschema.validate does not
+          modify the instance unless a validator like `default` is used and 
+          a validating instance of a DraftXValidator is created and used, 
+          which is more advanced usage).
     """
-    tool_def = None
-    for tool in available_tool_definitions:
-        if tool.get("name") == function_name:
-            tool_def = tool
-            break
+    if not JSONSCHEMA_AVAILABLE:
+        log.error(
+            "jsonschema library not available. Cannot perform robust validation for tool '%s'. Falling back to basic validation (all valid).", 
+            function_name,
+            extra={"event_type": "jsonschema_not_available", "details": {"tool_name": function_name}}
+        )
+        # Fallback: consider valid but log error. Or could return False.
+        # For now, to minimize disruption if library temporarily missing,
+        # let's assume valid but clearly log it's not a proper validation.
+        return True, "jsonschema library not available, validation skipped.", function_args
+
+    tool_def = next((tool for tool in available_tool_definitions if tool.get("name") == function_name), None)
 
     if not tool_def:
+        log.warning(
+            f"Tool definition not found for '{function_name}' during parameter validation.",
+            extra={"event_type": "tool_def_not_found_validation", "details": {"tool_name": function_name}}
+        )
         return False, f"Tool '{function_name}' not found in available tool definitions", function_args
 
-    parameters = tool_def.get("parameters", {})
-    if not parameters or not isinstance(parameters, dict):
+    parameter_schema = tool_def.get("parameters")
+
+    # If no "parameters" field or it's empty, or not a dict, consider it valid as there's no schema to check against.
+    if not parameter_schema or not isinstance(parameter_schema, dict) or not parameter_schema.get("properties"):
+        log.debug(
+            f"No parameter schema or properties defined for tool '{function_name}'. Skipping jsonschema validation.",
+            extra={"event_type": "no_parameter_schema_for_validation", "details": {"tool_name": function_name}}
+        )
         return True, None, function_args
 
-    required_params = parameters.get("required", [])
-    properties = parameters.get("properties", {})
-
-    missing_params = []
-    for param in required_params:
-        if param not in function_args or function_args[param] is None:
-            missing_params.append(param)
-
-    if missing_params:
-        return False, f"Missing required parameters for '{function_name}': {', '.join(missing_params)}", function_args
-
-    validation_errors = []
-    validated_args = {}
-
-    for param_name, param_value in function_args.items():
-        if param_name not in properties:
-            validated_args[param_name] = param_value
-            continue
-
-        param_schema = properties[param_name]
-        param_type = param_schema.get("type", "string").lower()
-
-        try:
-            if param_type == "string":
-                if param_value is not None and not isinstance(param_value, str):
-                    validated_args[param_name] = str(param_value)
-                else:
-                    validated_args[param_name] = param_value
-            elif param_type == "number":
-                if param_value is None:
-                    if param_name in required_params:
-                        validation_errors.append(f"Parameter '{param_name}' requires a number value")
-                    validated_args[param_name] = None
-                else:
-                    try:
-                        validated_args[param_name] = float(param_value)
-                    except (ValueError, TypeError):
-                        validation_errors.append(f"Parameter '{param_name}' expected number, got '{param_value}'")
-                        validated_args[param_name] = param_value
-            elif param_type == "integer":
-                if param_value is None:
-                    if param_name in required_params:
-                        validation_errors.append(f"Parameter '{param_name}' requires an integer value")
-                    validated_args[param_name] = None
-                else:
-                    try:
-                        float_val = float(param_value)
-                        if float_val.is_integer():
-                            validated_args[param_name] = int(float_val)
-                        else:
-                            validation_errors.append(f"Parameter '{param_name}' expected integer, got float '{param_value}'")
-                            validated_args[param_name] = param_value
-                    except (ValueError, TypeError):
-                        validation_errors.append(f"Parameter '{param_name}' expected integer, got '{param_value}'")
-                        validated_args[param_name] = param_value
-            elif param_type == "boolean":
-                if param_value is None:
-                    if param_name in required_params:
-                        validation_errors.append(f"Parameter '{param_name}' requires a boolean value")
-                    validated_args[param_name] = None
-                else:
-                    if isinstance(param_value, str):
-                        if param_value.lower() == "true":
-                            validated_args[param_name] = True
-                        elif param_value.lower() == "false":
-                            validated_args[param_name] = False
-                        else:
-                            validation_errors.append(f"Parameter '{param_name}' expected boolean, got '{param_value}'")
-                            validated_args[param_name] = param_value
-                    else:
-                        validated_args[param_name] = bool(param_value)
-            elif param_type == "array":
-                if param_value is None:
-                    if param_name in required_params:
-                        validation_errors.append(f"Parameter '{param_name}' requires an array value")
-                    validated_args[param_name] = None
-                elif not isinstance(param_value, list):
-                    if isinstance(param_value, str) and \
-                       param_value.strip().startswith("[") and \
-                       param_value.strip().endswith("]"):
-                        try:
-                            validated_args[param_name] = json.loads(param_value)
-                        except json.JSONDecodeError:
-                            validation_errors.append(
-                                f"Parameter '{param_name}' expected array, got "
-                                f"invalid JSON string: '{param_value}'"
-                            )
-                            validated_args[param_name] = param_value
-                    else:
-                        validation_errors.append(
-                            f"Parameter '{param_name}' expected array, got "
-                            f"'{type(param_value).__name__}'"
-                        )
-                        validated_args[param_name] = param_value
-                else:
-                    validated_args[param_name] = param_value
-            elif param_type == "object":
-                if param_value is None:
-                    if param_name in required_params:
-                        validation_errors.append(f"Parameter '{param_name}' requires an object value")
-                    validated_args[param_name] = None
-                elif not isinstance(param_value, dict):
-                    if isinstance(param_value, str) and \
-                       param_value.strip().startswith("{") and \
-                       param_value.strip().endswith("}"):
-                        try:
-                            validated_args[param_name] = json.loads(param_value)
-                        except json.JSONDecodeError:
-                            validation_errors.append(
-                                f"Parameter '{param_name}' expected object, got "
-                                f"invalid JSON string: '{param_value}'"
-                            )
-                            validated_args[param_name] = param_value
-                    else:
-                        validation_errors.append(
-                            f"Parameter '{param_name}' expected object, got "
-                            f"'{type(param_value).__name__}'"
-                        )
-                        validated_args[param_name] = param_value
-                else:
-                    validated_args[param_name] = param_value
-            else:
-                validated_args[param_name] = param_value
-        except Exception as e:
-            validation_errors.append(f"Error validating '{param_name}': {str(e)}")
-            validated_args[param_name] = param_value
-
-    if validation_errors:
-        error_message = f"Parameter validation errors for '{function_name}': {'; '.join(validation_errors)}"
-        return False, error_message, validated_args
-
-    return True, None, validated_args
+    try:
+        # Validate the function_args against the parameter_schema
+        # jsonschema.validate raises ValidationError on failure, or returns None on success.
+        validate_schema(instance=function_args, schema=parameter_schema)
+        
+        # If validation passes, the original function_args are considered valid.
+        # The jsonschema `validate` function itself doesn't return the validated instance
+        # or an instance with defaults applied unless you use a validator instance
+        # that is configured to do so (e.g. Draft7Validator(schema).validate_filling_defaults(instance)).
+        # For now, we assume the primary goal is validation, not default filling here.
+        log.debug(
+            f"jsonschema validation successful for tool '{function_name}'.",
+            extra={"event_type": "jsonschema_validation_success", "details": {"tool_name": function_name, "args": function_args}}
+        )
+        return True, None, function_args
+    except SchemaValidationError as e:
+        # Construct a detailed error message
+        path_str = " -> ".join(map(str, e.path)) if e.path else "N/A"
+        validator_str = f"validator: '{e.validator}' with value '{e.validator_value}'"
+        schema_path_str = " -> ".join(map(str, e.schema_path)) if e.schema_path else "N/A"
+        
+        error_message = (
+            f"Parameter validation failed for '{function_name}': {e.message}. "
+            f"Path in data: '{path_str}'. Validator: {validator_str}. Schema path: '{schema_path_str}'."
+        )
+        log.warning(
+            error_message,
+            extra={
+                "event_type": "tool_parameter_jsonschema_validation_failed",
+                "details": {
+                    "tool_name": function_name,
+                    "raw_error": str(e), # Full exception string
+                    "message": e.message,
+                    "path": list(e.path),
+                    "validator": e.validator,
+                    "validator_value": e.validator_value,
+                    "schema_path": list(e.schema_path),
+                    "schema": e.schema, # The sub-schema that failed
+                    "instance_value_at_failure": e.instance # The value in the instance that failed
+                }
+            }
+        )
+        # Return original args for context, but indicate failure with the detailed message
+        return False, error_message, function_args
+    except Exception as e:  # Catch other potential errors from the validation library itself or schema issues
+        log.error(
+            f"An unexpected error occurred during jsonschema validation for tool '{function_name}': {e}",
+            exc_info=True,
+            extra={"event_type": "jsonschema_unexpected_error", "details": {"tool_name": function_name, "error": str(e)}}
+        )
+        return False, f"Unexpected validation error for '{function_name}': {str(e)}", function_args
 
 # --- Circular Call Detection ---
 

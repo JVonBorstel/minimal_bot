@@ -5,12 +5,14 @@ No more dummy data - let's see if the bot actually works with real user data
 """
 
 import asyncio
+import pytest # Add pytest
 import time
 from config import get_config
 from user_auth.models import UserProfile
 from tools.tool_executor import ToolExecutor
 from state_models import AppState
 
+@pytest.mark.asyncio
 async def test_with_real_user_data():
     print("🎯 REAL USER DATA TEST")
     print("Testing with actual user email to get real Jira tickets")
@@ -133,7 +135,7 @@ async def test_with_real_user_data():
         traceback.print_exc()
         return False, None
 
-async def test_specific_email(email: str):
+async def _run_test_for_specific_email(email: str):
     """Test with a specific email address provided by the user"""
     print(f"🎯 TESTING WITH SPECIFIC EMAIL: {email}")
     print("=" * 80)
@@ -210,7 +212,7 @@ if __name__ == "__main__":
         test_email = "YOUR_ACTUAL_JIRA_EMAIL@COMPANY.COM"  # REPLACE THIS
         
         if test_email != "YOUR_ACTUAL_JIRA_EMAIL@COMPANY.COM":
-            asyncio.run(test_specific_email(test_email))
+            asyncio.run(_run_test_for_specific_email(test_email))
         else:
             print("❌ Please edit the script and replace YOUR_ACTUAL_JIRA_EMAIL@COMPANY.COM with your real email")
     

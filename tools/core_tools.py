@@ -1,10 +1,14 @@
 """Core tools that are always available to users."""
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from ._tool_decorator import tool_function
 from config import Config
 from datetime import datetime
+from user_auth.permissions import Permission
+from workflows.onboarding import OnboardingWorkflow
+from user_auth import db_manager
+import time
 
 log = logging.getLogger(__name__)
 
@@ -81,16 +85,67 @@ async def help(topic: str = None, config: Config = None) -> Dict[str, Any]:
     }
     help_response["sections"].append(examples_section)
     
-    # Tool categories
-    categories_section = {
-        "name": "🛠️ Available Tool Categories",
-        "content": [
+    # Tool categories - Now dynamically generated
+    categories_section_content = ["An overview of my capabilities by category:"]
+    if config and hasattr(config, 'tool_executor_instance') and config.tool_executor_instance:
+        try:
+            tool_defs = config.tool_executor_instance.get_available_tool_definitions()
+            categorized_tools: Dict[str, List[str]] = {}
+            for tool_def in tool_defs:
+                tool_name = tool_def.get('name', 'Unnamed Tool')
+                # Use metadata.categories if available, otherwise infer from tool name or use a default
+                metadata = tool_def.get('metadata', {})
+                categories = metadata.get('categories', [])
+                
+                if not categories and '_' in tool_name: # Infer from tool name like 'github_list_repos' -> 'github'
+                    category_inferred = tool_name.split('_')[0].capitalize()
+                    categories = [category_inferred]
+                elif not categories:
+                    categories = ["General"] # Default category
+
+                for category in categories:
+                    display_category = category.replace("_", " ").title()
+                    if display_category not in categorized_tools:
+                        categorized_tools[display_category] = []
+                    
+                    # Add tool name with a brief description if available
+                    tool_desc = tool_def.get('description', 'No description available.')
+                    # Keep description brief for this list
+                    brief_desc = (tool_desc[:50] + '...') if len(tool_desc) > 50 else tool_desc
+                    categorized_tools[display_category].append(f"• **{tool_name}**: _{brief_desc}_")
+
+            if categorized_tools:
+                for category, tool_list_formatted in sorted(categorized_tools.items()):
+                    categories_section_content.append(f"\\n**{category} Tools:**")
+                    categories_section_content.extend(tool_list_formatted)
+            else:
+                categories_section_content.append("No tools seem to be available or configured at the moment.")
+
+        except Exception as e:
+            log.error(f"Error dynamically generating tool categories for help: {e}", exc_info=True)
+            categories_section_content.append("Could not retrieve dynamic tool list. Showing generic categories.")
+            # Fallback to original hardcoded content if dynamic generation fails
+            categories_section_content.extend([
+                "**GitHub Tools**: Repository management, issues, PRs, code search",
+                "**Jira Tools**: Project management, tickets, sprints, workflows",
+                "**Greptile Tools**: Semantic code search and analysis",
+                "**Perplexity Tools**: Web search and current information",
+                "**Core Tools**: Help, status, and basic utilities"
+            ])
+    else:
+        log.warning("Tool executor instance not found in config. Falling back to static help categories.")
+        # Fallback to original hardcoded content if config or executor is missing
+        categories_section_content.extend([
             "**GitHub Tools**: Repository management, issues, PRs, code search",
             "**Jira Tools**: Project management, tickets, sprints, workflows",
             "**Greptile Tools**: Semantic code search and analysis",
             "**Perplexity Tools**: Web search and current information",
             "**Core Tools**: Help, status, and basic utilities"
-        ]
+        ])
+
+    categories_section = {
+        "name": "🛠️ Available Tool Categories & Tools", # Updated name
+        "content": categories_section_content
     }
     help_response["sections"].append(categories_section)
     
@@ -174,21 +229,22 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
         Dictionary containing preference information or update results
     """
     try:
-        from user_auth.permissions import Permission
-        import time
-        
         # Get current user from app state
         if not app_state or not hasattr(app_state, 'current_user') or not app_state.current_user:
             return {
                 "status": "ERROR",
-                "message": "User profile not found. Please contact administrator."
+                "error_type": "UserProfileNotFound",
+                "user_facing_message": "I couldn't find your user profile. Please contact an administrator if this issue persists.",
+                "technical_details": "User profile not found in app_state or app_state.current_user is None."
             }
         
         user_profile = app_state.current_user
         profile_data = user_profile.profile_data or {}
         preferences = profile_data.get("preferences", {})
         
-        if action == "view":
+        action_lower = action.lower() # Case-insensitive action
+
+        if action_lower == "view":
             # Show current preferences
             if not profile_data.get("onboarding_completed"):
                 return {
@@ -197,7 +253,7 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
                     "onboarding_status": "incomplete"
                 }
             
-            pref_summary = f"**Your Preferences for {preferences.get('preferred_name', user_profile.display_name)}:**\n\n"
+            pref_summary = f"**Your Preferences for {preferences.get('preferred_name', user_profile.display_name)}:**\\n\\n"
             
             if preferences.get('primary_role'):
                 pref_summary += f"👤 **Role**: {preferences['primary_role']}\n"
@@ -233,11 +289,9 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
                 "onboarding_status": "completed"
             }
         
-        elif action == "restart_onboarding":
+        elif action_lower == "restart_onboarding":
             # Allow user to restart onboarding
             try:
-                from workflows.onboarding import OnboardingWorkflow
-                
                 # Clear existing onboarding completion
                 profile_data["onboarding_completed"] = False
                 if "onboarding_completed_at" in profile_data:
@@ -267,7 +321,6 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
                 
                 # Update user profile
                 user_profile.profile_data = profile_data
-                from user_auth import db_manager
                 profile_dict = user_profile.model_dump()
                 db_manager.save_user_profile(profile_dict)
                 
@@ -288,15 +341,19 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
                 log.error(f"Error restarting onboarding: {e}", exc_info=True)
                 return {
                     "status": "ERROR",
-                    "message": f"Failed to restart onboarding: {str(e)}"
+                    "error_type": "OnboardingRestartFailed",
+                    "user_facing_message": "I ran into a problem trying to restart the onboarding process. Please try again in a moment.",
+                    "technical_details": f"Failed to restart onboarding: {e.__class__.__name__}: {str(e)}"
                 }
         
-        elif action == "reset":
+        elif action_lower == "reset":
             # Admin function to reset user preferences
             if not app_state.has_permission(Permission.ADMIN_ACCESS_USERS):
                 return {
                     "status": "ERROR",
-                    "message": "You don't have permission to reset user preferences."
+                    "error_type": "PermissionDenied",
+                    "user_facing_message": "Sorry, you don't have the necessary permissions to perform this action.",
+                    "technical_details": "User lacks ADMIN_ACCESS_USERS permission for 'reset' action in preferences tool."
                 }
             
             # Reset all preferences
@@ -307,7 +364,6 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
                 "reset_by": user_profile.user_id
             }
             
-            from user_auth import db_manager
             profile_dict = user_profile.model_dump()
             db_manager.save_user_profile(profile_dict)
             
@@ -319,14 +375,18 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
         else:
             return {
                 "status": "ERROR", 
-                "message": f"Unknown action '{action}'. Use 'view', 'restart_onboarding', or 'reset'."
+                "error_type": "InvalidAction",
+                "user_facing_message": f"Sorry, I don't know how to '{action}'. You can ask to 'view', 'restart onboarding', or (for admins) 'reset' preferences.",
+                "technical_details": f"Unknown action '{action}' in preferences tool. Valid actions: 'view', 'restart_onboarding', 'reset'."
             }
             
     except Exception as e:
         log.error(f"Error in preferences tool: {e}", exc_info=True)
         return {
             "status": "ERROR",
-            "message": f"Error managing preferences: {str(e)}"
+            "error_type": "PreferencesToolError",
+            "user_facing_message": "I encountered an unexpected issue while managing preferences. Please try again.",
+            "technical_details": f"Error in preferences tool: {e.__class__.__name__}: {str(e)}"
         }
 
 @tool_function(
@@ -363,19 +423,18 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
         Dictionary containing admin operation results
     """
     try:
-        from user_auth.permissions import Permission
-        import time
-        
         # Check admin permissions
         if not app_state or not app_state.has_permission(Permission.ADMIN_ACCESS_USERS):
             return {
                 "status": "ERROR",
-                "message": "You don't have permission to perform admin onboarding operations."
+                "error_type": "PermissionDenied",
+                "user_facing_message": "Sorry, you don't have the necessary permissions for this admin operation.",
+                "technical_details": "User lacks ADMIN_ACCESS_USERS permission for onboarding_admin tool."
             }
         
-        from user_auth import db_manager
-        
-        if action == "list_incomplete":
+        action_lower = action.lower() # Case-insensitive action
+
+        if action_lower == "list_incomplete":
             # List users who haven't completed onboarding
             all_profiles = db_manager.get_all_user_profiles()
             incomplete_users = []
@@ -419,11 +478,13 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
                 "incomplete_count": len(incomplete_users)
             }
         
-        elif action == "view_user":
+        elif action_lower == "view_user":
             if not user_identifier:
                 return {
                     "status": "ERROR",
-                    "message": "User identifier required for view_user action."
+                    "error_type": "MissingParameter",
+                    "user_facing_message": "Please specify which user you'd like to view. You can use their ID or email.",
+                    "technical_details": "user_identifier not provided for view_user action in onboarding_admin."
                 }
             
             # Find user by ID or email
@@ -442,7 +503,9 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
             if not user_profile_data:
                 return {
                     "status": "ERROR",
-                    "message": f"User not found: {user_identifier}"
+                    "error_type": "UserNotFound",
+                    "user_facing_message": f"I couldn't find a user with the identifier '{user_identifier}'.",
+                    "technical_details": f"User not found: {user_identifier} in onboarding_admin/view_user."
                 }
             
             profile_data = user_profile_data.get("profile_data") or {}
@@ -491,11 +554,13 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
                 "onboarding_completed": onboarding_completed
             }
         
-        elif action == "force_complete":
+        elif action_lower == "force_complete":
             if not user_identifier:
                 return {
                     "status": "ERROR", 
-                    "message": "User identifier required for force_complete action."
+                    "error_type": "MissingParameter",
+                    "user_facing_message": "Please specify which user you'd like to force complete onboarding for. You can use their ID.",
+                    "technical_details": "user_identifier not provided for force_complete action in onboarding_admin."
                 }
             
             # Find and update user
@@ -503,7 +568,9 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
             if not user_profile_data:
                 return {
                     "status": "ERROR",
-                    "message": f"User not found: {user_identifier}"
+                    "error_type": "UserNotFound",
+                    "user_facing_message": f"I couldn't find a user with the ID '{user_identifier}'.",
+                    "technical_details": f"User not found: {user_identifier} in onboarding_admin/force_complete."
                 }
             
             # Mark onboarding as complete
@@ -523,16 +590,21 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
                     "user_updated": user_profile_data['display_name']
                 }
             else:
+                log.error(f"Failed to save user profile for {user_identifier} during force_complete.") # Added log
                 return {
                     "status": "ERROR",
-                    "message": f"Failed to update user profile for {user_identifier}"
+                    "error_type": "ProfileUpdateFailed",
+                    "user_facing_message": f"I tried to mark onboarding as complete for {user_identifier}, but couldn't save the changes. Please check the logs.",
+                    "technical_details": f"db_manager.save_user_profile returned False for {user_identifier} in onboarding_admin/force_complete."
                 }
         
-        elif action == "reset_user":
+        elif action_lower == "reset_user":
             if not user_identifier:
                 return {
                     "status": "ERROR",
-                    "message": "User identifier required for reset_user action."
+                    "error_type": "MissingParameter",
+                    "user_facing_message": "Please specify which user you'd like to reset. You can use their ID.",
+                    "technical_details": "user_identifier not provided for reset_user action in onboarding_admin."
                 }
             
             # Find and reset user
@@ -540,7 +612,9 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
             if not user_profile_data:
                 return {
                     "status": "ERROR",
-                    "message": f"User not found: {user_identifier}"
+                    "error_type": "UserNotFound",
+                    "user_facing_message": f"I couldn't find a user with the ID '{user_identifier}'.",
+                    "technical_details": f"User not found: {user_identifier} in onboarding_admin/reset_user."
                 }
             
             # Reset onboarding
@@ -559,20 +633,27 @@ async def onboarding_admin(action: str, user_identifier: str = None, app_state: 
                     "user_reset": user_profile_data['display_name']
                 }
             else:
+                log.error(f"Failed to save user profile for {user_identifier} during reset_user.") # Added log
                 return {
                     "status": "ERROR",
-                    "message": f"Failed to reset user profile for {user_identifier}"
+                    "error_type": "ProfileUpdateFailed",
+                    "user_facing_message": f"I tried to reset onboarding for {user_identifier}, but couldn't save the changes. Please check the logs.",
+                    "technical_details": f"db_manager.save_user_profile returned False for {user_identifier} in onboarding_admin/reset_user."
                 }
         
         else:
             return {
                 "status": "ERROR",
-                "message": f"Unknown admin action '{action}'. Use 'list_incomplete', 'view_user', 'force_complete', or 'reset_user'."
+                "error_type": "InvalidAction",
+                "user_facing_message": f"Sorry, I don't know how to perform the admin action '{action}'. Valid actions are 'list_incomplete', 'view_user', 'force_complete', or 'reset_user'.",
+                "technical_details": f"Unknown admin action '{action}' in onboarding_admin tool."
             }
             
     except Exception as e:
         log.error(f"Error in onboarding admin tool: {e}", exc_info=True)
         return {
             "status": "ERROR",
-            "message": f"Error in onboarding admin: {str(e)}"
+            "error_type": "OnboardingAdminToolError",
+            "user_facing_message": "I encountered an unexpected issue while performing that admin action. Please try again.",
+            "technical_details": f"Error in onboarding_admin tool: {e.__class__.__name__}: {str(e)}"
         } 

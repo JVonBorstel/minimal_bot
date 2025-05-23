@@ -14,7 +14,8 @@ from typing import Dict, List, Any, Optional, Callable, Tuple, Union, cast
 
 from config import Config
 from tools.tool_executor import ToolExecutor
-from state_models import AppState, ToolSelectionRecord
+from state_models import AppState  # ToolSelectionRecord moved to user_auth.models
+from user_auth.models import ToolSelectionRecord # Import from new location
 from bot_core.tool_management.tool_models import ToolCallResult, ToolCallRequest
 
 log = logging.getLogger("core_logic.tool_call_adapter")
@@ -49,21 +50,23 @@ class ToolCallAdapter:
     # Maximum score bonus that can be awarded based on historical data (0.0-2.0)
     MAX_HISTORY_BONUS = 2.0
     
+    # Maximum score bonus that can be awarded based on tool importance (0.0-1.5)
+    MAX_IMPORTANCE_BONUS = 1.5
+    
     # Number of similar tool calls required to reach maximum confidence factor
     HISTORY_CONFIDENCE_THRESHOLD = 5
 
-    def __init__(self, tool_executor: ToolExecutor, state_manager: Any = None):
+    def __init__(self, tool_executor: ToolExecutor, config: Config):
         """
         Initialize the ToolCallAdapter.
         
         Args:
             tool_executor: The ToolExecutor instance that manages detailed tools.
-            state_manager: The StateManager instance for accessing and updating AppState, including tool selection metrics.
+            config: The application configuration.
         """
         self.tool_executor = tool_executor
-        self.state_manager = state_manager
+        self.config = config
         self.tool_map = self._build_tool_map()
-        # Allow for overriding or extending param_mappings via config if needed in future
         self.param_mappings = self.DEFAULT_PARAM_MAPPINGS.copy()
         log.info(f"ToolCallAdapter initialized with {len(self.tool_map)} service mappings")
         for service, tools in self.tool_map.items():
@@ -91,69 +94,10 @@ class ToolCallAdapter:
         
         return tool_map
 
-    async def _get_app_state(self, session_id: str = "current") -> Optional[AppState]:
-        """
-        Helper method to get app state, handling both coroutine and non-coroutine state managers.
-        
-        Args:
-            session_id: The session ID to get state for
-            
-        Returns:
-            The AppState object or None if not available
-        """
-        if not self.state_manager:
-            return None
-            
-        try:
-            # Try to handle both coroutine and non-coroutine get_app_state methods
-            get_method = self.state_manager.get_app_state
-            
-            if inspect.iscoroutinefunction(get_method) or hasattr(get_method, "__await__"):
-                # It's a coroutine function
-                return await get_method(session_id)
-            else:
-                # It's a regular method
-                return get_method(session_id)
-        except Exception as e:
-            log.error(f"Error getting app state: {e}", exc_info=True)
-            return None
-    
-    async def _save_app_state(self, session_id: str, app_state: AppState) -> bool:
-        """
-        Helper method to save app state, handling both coroutine and non-coroutine state managers.
-        
-        Args:
-            session_id: The session ID to save state for
-            app_state: The AppState object to save
-            
-        Returns:
-            True if save was successful, False otherwise
-        """
-        if not self.state_manager:
-            return False
-            
-        try:
-            # Try to handle both coroutine and non-coroutine save_app_state methods
-            save_method = self.state_manager.save_app_state
-            
-            if inspect.iscoroutinefunction(save_method) or hasattr(save_method, "__await__"):
-                # It's a coroutine function
-                await save_method(session_id, app_state)
-            else:
-                # It's a regular method, but MagicMock might still return a coroutine in tests
-                # Use try/except to handle this gracefully
-                try:
-                    result = save_method(session_id, app_state)
-                    if asyncio.iscoroutine(result):
-                        await result  # Await the coroutine if returned by MagicMock
-                except RuntimeWarning:
-                    # Suppress "coroutine was never awaited" warnings from MagicMock in tests
-                    pass
-            return True
-        except Exception as e:
-            log.error(f"Error saving app state: {e}", exc_info=True)
-            return False
-    
+    def _normalize_param_name(self, name: str) -> str:
+        """Normalizes a parameter name for fuzzy matching by lowercasing and removing underscores/hyphens."""
+        return name.lower().replace("_", "").replace("-", "")
+
     def _normalize_query_string(self, params: Dict[str, Any]) -> str:
         """
         Normalize parameters into a consistent query string for comparison.
@@ -185,13 +129,14 @@ class ToolCallAdapter:
         else:
             return False
     
-    async def process_llm_tool_call(self, tool_call: Dict[str, Any]) -> Any:
+    async def process_llm_tool_call(self, tool_call: Dict[str, Any], app_state: Optional[AppState]) -> Any:
         """
         Process an LLM service-level tool call and route to the correct implementation.
         
         Args:
             tool_call: The tool call from the LLM, including name (service) and parameters.
                 Expected format: {"name": "service", "params": {...}}
+            app_state: The current application state, for learning and context.
         
         Returns:
             The result from the selected detailed tool implementation.
@@ -210,6 +155,9 @@ class ToolCallAdapter:
         # Check if the service exists in our mapping
         if service not in self.tool_map:
             log.warning(f"Unknown tool service: {service}")
+            # Record failed selection if app_state is available (for overall metrics)
+            if app_state:
+                await self._record_selection_outcome(app_state, self._normalize_query_string(params), selected_tool=None, used_tool=None, success=False)
             return {"status": "ERROR", "message": f"Unknown tool service: {service}"}
         
         # Normalize query string for historical comparison
@@ -221,13 +169,8 @@ class ToolCallAdapter:
             "params": params.copy()
         }
         
-        # Extract session_id from the tool_call, defaulting if not present
-        session_id = tool_call.get("session_id", "current") # Added for state operations
-        if session_id == "current" and service != "test_service_no_session_id": # Avoid warning for specific test case
-            log.warning(f"'session_id' not found in tool_call for service '{service}', defaulting to 'current'. This might lead to incorrect state management.")
-
         # Select the appropriate detailed tool based on service, parameters, and historical data
-        selected_tool = await self._select_tool(service, params, query_string, session_id) # Pass session_id
+        selected_tool = await self._select_tool(service, params, query_string, app_state)
         if not selected_tool:
             log.warning(f"Could not determine specific tool for service '{service}' with params {params}")
             
@@ -237,9 +180,9 @@ class ToolCallAdapter:
             if len(candidate_tools) > 5:
                 tools_str += f", ... ({len(candidate_tools) - 5} more)"
             
-            # Record failed selection if state_manager is available
-            if self.state_manager:
-                await self._record_selection_outcome(session_id, query_string, selected_tool=None, used_tool=None, success=False) # Pass session_id
+            # Record failed selection if app_state is available
+            if app_state:
+                await self._record_selection_outcome(app_state, query_string, selected_tool=None, used_tool=None, success=False)
                 
             return {
                 "status": "ERROR", 
@@ -273,10 +216,10 @@ class ToolCallAdapter:
             tool_input=transformed_params
         )
         
-        # Record the outcome if state_manager is available
-        if self.state_manager:
+        # Record the outcome if app_state is available
+        if app_state:
             success = self._determine_success(tool_result)
-            await self._record_selection_outcome(session_id, query_string, selected_tool, used_tool=selected_tool, success=success) # Pass session_id
+            await self._record_selection_outcome(app_state, query_string, selected_tool, used_tool=selected_tool, success=success)
         
         # Enhance tool result with context of the original request and adapter decisions
         if isinstance(tool_result, dict):
@@ -298,7 +241,7 @@ class ToolCallAdapter:
         # If result is not a dict (like ToolCallResult), return as is
         return tool_result
     
-    async def _select_tool(self, service: str, params: Dict[str, Any], query_string: str, session_id: str) -> Optional[str]:
+    async def _select_tool(self, service: str, params: Dict[str, Any], query_string: str, app_state: Optional[AppState]) -> Optional[str]:
         """
         Selects the most appropriate detailed tool for a given service and parameters.
         
@@ -306,7 +249,7 @@ class ToolCallAdapter:
             service: The simplified service name (e.g., "github")
             params: The parameters provided by the LLM
             query_string: A normalized string representation of the parameters for historical comparison
-            session_id: The current session ID for fetching historical data
+            app_state: The current application state for fetching historical data.
         
         Returns:
             The selected detailed tool name, or None if no suitable tool is found.
@@ -329,12 +272,20 @@ class ToolCallAdapter:
             # Basic parameter match score
             base_score = self._calculate_tool_match_score(tool_def, params)
             
-            # Apply historical success bonus if available
-            history_bonus = await self._get_historical_success_bonus(tool_name, query_string, session_id) # Pass session_id
+            # Apply historical success bonus if app_state is available
+            history_bonus = 0.0
+            if app_state:
+                history_bonus = await self._get_historical_success_bonus(tool_name, query_string, app_state)
             
-            # Combine scores (base score plus history bonus)
-            scores[tool_name] = base_score + history_bonus
-            log.debug(f"Tool '{tool_name}' match score: {base_score} + history bonus {history_bonus} = {scores[tool_name]}")
+            # Apply tool importance bonus
+            importance_bonus = 0.0
+            tool_metadata = tool_def.get("metadata", {})
+            tool_importance = tool_metadata.get("importance", 5) # Default to mid-importance (5) if not specified
+            importance_bonus = (tool_importance / 10.0) * self.MAX_IMPORTANCE_BONUS
+
+            # Combine scores (base score plus history bonus and importance bonus)
+            scores[tool_name] = base_score + history_bonus + importance_bonus
+            log.debug(f"Tool '{tool_name}' match score: base={base_score:.2f}, history={history_bonus:.2f}, importance={importance_bonus:.2f}, total={scores[tool_name]:.2f}")
         
         # No tools with scores
         if not scores:
@@ -352,29 +303,27 @@ class ToolCallAdapter:
             
         return best_tool
     
-    async def _get_historical_success_bonus(self, tool_name: str, query_string: str, session_id: str) -> float:
+    async def _get_historical_success_bonus(self, tool_name: str, query_string: str, app_state: AppState) -> float:
         """
         Calculates a score bonus based on historical success with this tool for similar queries.
         
         Args:
             tool_name: The detailed tool name being considered
             query_string: A normalized string representation of the current parameters
-            session_id: The ID of the current session to fetch relevant AppState
+            app_state: The AppState object containing historical data.
         
         Returns:
             A score bonus (0.0-2.0) to add to the base match score
         """
         try:
-            if not self.state_manager:
+            if not app_state or not app_state.current_user or not app_state.current_user.tool_adapter_metrics:
                 return 0.0
                 
-            app_state = await self._get_app_state(session_id) # Use provided session_id
-            if not app_state or not app_state.tool_selection_metrics:
-                return 0.0
-                
+            target_metrics = app_state.current_user.tool_adapter_metrics
+            
             # Look for records with similar query parameters
             similar_records = [
-                record for record in app_state.tool_selection_metrics.selection_records
+                record for record in target_metrics.selection_records
                 if record.query == query_string and tool_name in record.selected_tools
             ]
             
@@ -403,24 +352,30 @@ class ToolCallAdapter:
             log.error(f"Error calculating historical success bonus: {e}", exc_info=True)
             return 0.0
     
-    async def _record_selection_outcome(self, session_id: str, query_string: str, selected_tool: Optional[str], used_tool: Optional[str], success: bool) -> None:
+    async def _record_selection_outcome(self, app_state: AppState, query_string: str, selected_tool: Optional[str], used_tool: Optional[str], success: bool) -> None:
         """
         Records the outcome of a tool selection for future learning.
         
         Args:
-            session_id: The ID of the current session
+            app_state: The AppState object to update.
             query_string: A normalized string representation of the parameters
             selected_tool: The tool that was selected by the adapter (may be None if selection failed)
             used_tool: The tool that was actually used (may be None if execution failed)
             success: Whether the tool execution was successful
         """
         try:
-            if not self.state_manager:
+            if not app_state or not app_state.current_user:
                 return
-                
-            app_state = await self._get_app_state(session_id) # Use provided session_id
-            if not app_state:
+
+            # Ensure tool_adapter_metrics exists on current_user (it should have a default_factory)
+            if not hasattr(app_state.current_user, 'tool_adapter_metrics') or app_state.current_user.tool_adapter_metrics is None:
+                log.error("UserProfile.tool_adapter_metrics is missing or None. Cannot record outcome.")
+                # Potentially initialize it here if absolutely necessary, but default_factory should handle it.
+                # from state_models import ToolSelectionMetrics # Would need this import if initializing here
+                # app_state.current_user.tool_adapter_metrics = ToolSelectionMetrics()
                 return
+
+            target_metrics = app_state.current_user.tool_adapter_metrics
                 
             # Prepare the selection record
             selection_record = ToolSelectionRecord(
@@ -431,21 +386,25 @@ class ToolCallAdapter:
             )
             
             # Update metrics
-            app_state.tool_selection_metrics.total_selections += 1
+            target_metrics.total_selections += 1
             if success:
-                app_state.tool_selection_metrics.successful_selections += 1
+                target_metrics.successful_selections += 1
             
             # Add to selection history (keep limited number)
-            app_state.tool_selection_metrics.selection_records.append(selection_record)
+            # Ensure selection_records list exists
+            if not isinstance(target_metrics.selection_records, list):
+                target_metrics.selection_records = []
+                
+            target_metrics.selection_records.append(selection_record) # Append first
+            max_records = self.config.settings.get("tool_adapter_max_selection_records", self.MAX_SELECTION_RECORDS)
+            if len(target_metrics.selection_records) > max_records:
+                target_metrics.selection_records = target_metrics.selection_records[-max_records:]
             
-            # Trim if necessary to maintain maximum size
-            if len(app_state.tool_selection_metrics.selection_records) > self.MAX_SELECTION_RECORDS:
-                app_state.tool_selection_metrics.selection_records = app_state.tool_selection_metrics.selection_records[-self.MAX_SELECTION_RECORDS:]
+            # Persist updated state - NO LONGER DONE HERE. Agent loop handles saving AppState.
+            # The calling code will be responsible for saving UserProfile if metrics changed.
+            # This method should probably return a flag if metrics were indeed updated.
             
-            # Persist updated state
-            await self._save_app_state(session_id, app_state) # Use provided session_id
-            
-            log.info(f"Recorded tool selection outcome: {query_string} -> {selected_tool or 'None'} -> {success}")
+            log.info(f"Recorded tool selection outcome for user {app_state.current_user.user_id}: {query_string} -> {selected_tool or 'None'} -> {success} (UserProfile metrics updated)")
             
         except Exception as e:
             log.error(f"Error recording selection outcome: {e}", exc_info=True)
@@ -468,49 +427,126 @@ class ToolCallAdapter:
         tool_expected_params_schema = tool_def["parameters"].get("properties", {})
         required_tool_params = tool_def["parameters"].get("required", [])
 
-        # Check for required parameters using parameter mappings
-        effectively_provided_params = set(params.keys())
-        for expected_param, variations in self.param_mappings.items():
-            if expected_param in required_tool_params:
-                for var in variations:
-                    if var in params:
-                        effectively_provided_params.add(expected_param)
-                        break
+        # --- Determine effectively provided parameters (for required check) ---
+        effectively_provided_params = set() # Stores canonical names of provided required params
+        llm_params_normalized_map = {self._normalize_param_name(k): k for k in params.keys()}
+
+        for req_param_canon in required_tool_params:
+            # 1. Direct match with canonical name
+            if req_param_canon in params:
+                effectively_provided_params.add(req_param_canon)
+                continue
+            
+            # 2. Check defined aliases
+            found_by_alias = False
+            for alias in self.param_mappings.get(req_param_canon, []):
+                if alias in params:
+                    effectively_provided_params.add(req_param_canon)
+                    found_by_alias = True
+                    break
+            if found_by_alias:
+                continue
+            
+            # 3. Check normalized canonical name against normalized LLM keys
+            norm_req_param_canon = self._normalize_param_name(req_param_canon)
+            if norm_req_param_canon in llm_params_normalized_map:
+                llm_actual_key = llm_params_normalized_map[norm_req_param_canon]
+                effectively_provided_params.add(req_param_canon)
+                log.debug(f"Tool '{tool_def['name']}': Required param '{req_param_canon}' matched via normalization to LLM param '{llm_actual_key}'.")
+                continue
         
-        # Check if any required parameters are missing
-        missing_required = [
-            req_param for req_param in required_tool_params 
-            if req_param not in effectively_provided_params
-        ]
+        # Check if any required parameters are TRULY missing after all checks (including inference)
+        truly_missing_required = []
+        for req_param_canon in required_tool_params:
+            if req_param_canon not in effectively_provided_params:
+                can_be_inferred = False
+                # Inference for 'repository_name' from 'owner'
+                if req_param_canon == "repository_name":
+                    owner_param_value = None
+                    possible_owner_keys_direct = ["owner"] # Check canonical first
+                    possible_owner_keys_alias = self.param_mappings.get("owner", [])
+                    
+                    # Check direct LLM param keys
+                    for p_key in possible_owner_keys_direct + possible_owner_keys_alias:
+                        if p_key in params:
+                            owner_param_value = params[p_key]
+                            break
+                    # If not found by direct/alias, check normalized LLM keys
+                    if owner_param_value is None:
+                        norm_owner_canon = self._normalize_param_name("owner")
+                        if norm_owner_canon in llm_params_normalized_map:
+                             owner_param_value = params[llm_params_normalized_map[norm_owner_canon]]
+
+                    if owner_param_value and isinstance(owner_param_value, str) and "/" in owner_param_value:
+                        parts = owner_param_value.split("/", 1)
+                        if len(parts) == 2 and parts[1]: 
+                            can_be_inferred = True
+                            log.debug(f"Tool '{tool_def['name']}': Required param '{req_param_canon}' provisionally inferred from 'owner' value '{owner_param_value}' for scoring.")
+                
+                if not can_be_inferred:
+                    truly_missing_required.append(req_param_canon)
         
-        if missing_required:
-            log.debug(f"Tool '{tool_def['name']}' effectively missing required parameters for scoring: {missing_required} (Original LLM params: {list(params.keys())})")
+        if truly_missing_required:
+            log.debug(f"Tool '{tool_def['name']}' effectively missing required parameters for scoring after all checks: {truly_missing_required} (Original LLM params: {list(params.keys())})")
             return 0.0
 
-        # Start with a base score of 1.0 if all required parameters are present
+        # Start with a base score of 1.0 if all required parameters are present (or inferable)
         score = 1.0
 
         # Bonus for action/method parameter matching tool name
-        action_param_from_llm = params.get("action") or params.get("method")
-        if action_param_from_llm and action_param_from_llm.lower() in tool_def["name"].lower():
+        action_param_from_llm = None
+        # Check direct, alias, and normalized for "action" or "method"
+        action_keys_to_check = ["action", "method"]
+        normalized_action_keys = [self._normalize_param_name(k) for k in action_keys_to_check]
+
+        for llm_key, llm_value in params.items():
+            if llm_key in action_keys_to_check:
+                action_param_from_llm = llm_value
+                break
+            if self._normalize_param_name(llm_key) in normalized_action_keys:
+                action_param_from_llm = llm_value
+                break
+        
+        if action_param_from_llm and isinstance(action_param_from_llm, str) and action_param_from_llm.lower() in tool_def["name"].lower():
             score += 2.0
         
-        # Count matched parameters
+        # --- Count matched parameters (direct, alias, or normalized) ---
         matched_param_count = 0
-        for tool_param_name in tool_expected_params_schema.keys():
-            # Direct match
-            if tool_param_name in params:
+        # To avoid double counting if multiple tool params map to the same LLM param, or LLM sends redundant params
+        llm_params_already_used_for_match = set()
+
+        for tool_param_canon in tool_expected_params_schema.keys():
+            matched_this_tool_param = False
+            # 1. Direct match with canonical tool parameter name
+            if tool_param_canon in params and tool_param_canon not in llm_params_already_used_for_match:
                 matched_param_count += 1
+                llm_params_already_used_for_match.add(tool_param_canon)
+                matched_this_tool_param = True
+            if matched_this_tool_param:
                 continue
-                
-            # Check mapped parameter variations
-            for mapped_tool_param, llm_variations in self.param_mappings.items():
-                if tool_param_name == mapped_tool_param:
-                    for llm_var in llm_variations:
-                        if llm_var in params:
-                            matched_param_count += 1
-                            break
-                    break
+
+            # 2. Check defined aliases for the canonical tool parameter
+            for alias in self.param_mappings.get(tool_param_canon, []):
+                if alias in params and alias not in llm_params_already_used_for_match:
+                    matched_param_count += 1
+                    llm_params_already_used_for_match.add(alias)
+                    matched_this_tool_param = True
+                    break 
+            if matched_this_tool_param:
+                continue
+
+            # 3. Check normalized canonical tool_param_name against normalized LLM keys
+            norm_tool_param_canon = self._normalize_param_name(tool_param_canon)
+            if norm_tool_param_canon in llm_params_normalized_map:
+                original_llm_key = llm_params_normalized_map[norm_tool_param_canon]
+                if original_llm_key not in llm_params_already_used_for_match:
+                    matched_param_count += 1
+                    llm_params_already_used_for_match.add(original_llm_key)
+                    log.debug(f"Tool '{tool_def['name']}': Tool param '{tool_param_canon}' matched to LLM param '{original_llm_key}' via normalization for scoring count.")
+                    # matched_this_tool_param = True # Not strictly needed here as we continue outer loop
+                # We don't 'continue' here as this tool_param_canon is now considered matched.
+                # The 'continue' statements above are to move to the next tool_param_canon.
+                # This means if a param is matched by normalization, it's counted.
         
         # Add points for matched parameters
         score += matched_param_count

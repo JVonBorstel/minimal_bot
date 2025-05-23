@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sys
 import os
+import pytest # Add pytest
 
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,6 +38,7 @@ for category, tools in EXPECTED_TOOLS.items():
 
 TOTAL_EXPECTED = 10
 
+@pytest.mark.asyncio
 async def test_tool_discovery_via_executor():
     """Test tool discovery through ToolExecutor - PRIMARY validation."""
     print("🔍 TESTING TOOL DISCOVERY VIA TOOLEXECUTOR")
@@ -128,6 +130,7 @@ async def test_tool_discovery_via_executor():
         log.error(f"Tool discovery test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_tool_lists_all_tools():
     """Test that help tool actually shows all 10 tools in its output."""
     print("\n🔍 TESTING HELP TOOL LISTS ALL TOOLS")
@@ -183,6 +186,7 @@ async def test_help_tool_lists_all_tools():
         log.error(f"Help content test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_individual_tool_availability():
     """Test that each expected tool can be found individually."""
     print("\n🔍 TESTING INDIVIDUAL TOOL AVAILABILITY")

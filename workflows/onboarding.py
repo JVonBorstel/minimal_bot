@@ -13,6 +13,7 @@ from state_models import AppState, WorkflowContext
 from user_auth.models import UserProfile
 from user_auth.permissions import UserRole
 from config import get_config
+from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
@@ -25,28 +26,17 @@ class OnboardingQuestionType:
     ROLE_REQUEST = "role_request"
     MULTI_CHOICE = "multi_choice"
 
-class OnboardingQuestion:
+class OnboardingQuestion(BaseModel):
     """Represents a single onboarding question."""
     
-    def __init__(
-        self,
-        key: str,
-        question: str,
-        question_type: str,
-        choices: Optional[List[str]] = None,
-        required: bool = True,
-        help_text: Optional[str] = None,
-        validation_pattern: Optional[str] = None,
-        follow_up_questions: Optional[Dict[str, List['OnboardingQuestion']]] = None
-    ):
-        self.key = key
-        self.question = question
-        self.question_type = question_type
-        self.choices = choices or []
-        self.required = required
-        self.help_text = help_text
-        self.validation_pattern = validation_pattern
-        self.follow_up_questions = follow_up_questions or {}
+    key: str
+    question: str
+    question_type: str
+    choices: List[str] = Field(default_factory=list)
+    required: bool = True
+    help_text: Optional[str] = None
+    validation_pattern: Optional[str] = None
+    follow_up_questions: Dict[str, List['OnboardingQuestion']] = Field(default_factory=dict)
 
 # Define the onboarding question sequence
 ONBOARDING_QUESTIONS = [
@@ -272,7 +262,7 @@ class OnboardingWorkflow:
             if question.required:
                 return {
                     "valid": False,
-                    "error": "This question is required. Please provide an answer."
+                    "error": "This one's important for setup! Could you please provide an answer? Or, if you'd prefer, you can type 'skip onboarding' to bypass the rest of this setup."
                 }
             else:
                 return {
@@ -289,7 +279,7 @@ class OnboardingWorkflow:
             else:
                 return {
                     "valid": False,
-                    "error": "Please answer with 'yes' or 'no'"
+                    "error": "Hmm, I was expecting a 'yes' or 'no' there. Could you try that? (Or type 'skip onboarding' to skip.)"
                 }
         
         elif question.question_type == OnboardingQuestionType.CHOICE:
@@ -307,9 +297,10 @@ class OnboardingWorkflow:
                 if user_lower in choice.lower() or choice.lower() in user_lower:
                     return {"valid": True, "processed_value": choice}
             
+            formatted_choices = "\n".join(f"{i+1}. {choice}" for i, choice in enumerate(question.choices))
             return {
                 "valid": False,
-                "error": f"Please choose from: {', '.join(f'{i+1}. {choice}' for i, choice in enumerate(question.choices))}"
+                "error": f"Hmm, that wasn't one of the options. Could you pick from the list, or enter the number? You can also type 'skip onboarding' to bypass this.\n\nAvailable choices:\n{formatted_choices}"
             }
         
         elif question.question_type == OnboardingQuestionType.MULTI_CHOICE:
@@ -331,9 +322,10 @@ class OnboardingWorkflow:
                             break
             
             if not selections:
+                formatted_choices = "\n".join(f"{i+1}. {choice}" for i, choice in enumerate(question.choices))
                 return {
                     "valid": False,
-                    "error": f"Please select from: {', '.join(f'{i+1}. {choice}' for i, choice in enumerate(question.choices))}"
+                    "error": f"Hmm, I didn't quite get that. For this one, please select one or more from the list (you can use numbers or text). Or, feel free to type 'skip onboarding'.\n\nAvailable choices:\n{formatted_choices}"
                 }
             
             return {"valid": True, "processed_value": selections}
@@ -344,7 +336,7 @@ class OnboardingWorkflow:
             else:
                 return {
                     "valid": False,
-                    "error": "Please enter a valid email address"
+                    "error": "That doesn't look quite like an email address. Could you please enter a valid one? (Or type 'skip onboarding' if you'd rather skip this step.)"
                 }
         
         else:  # TEXT type
@@ -559,6 +551,47 @@ class OnboardingWorkflow:
         message += "I'm here to help make your workflow smoother! 🚀"
         
         return message
+
+    def skip_onboarding(self, workflow_id: str) -> Dict[str, Any]:
+        """Allows a user to skip the onboarding process."""
+        if workflow_id not in self.app_state.active_workflows:
+            return {"success": False, "error": "Active onboarding workflow not found."}
+
+        workflow = self.app_state.active_workflows[workflow_id]
+        if workflow.workflow_type != "onboarding" or workflow.status != "active":
+            return {"success": False, "error": "Workflow is not an active onboarding process."}
+
+        # Update user profile data
+        profile_data = self.user_profile.profile_data or {}
+        profile_data["onboarding_completed"] = True # Mark as completed for should_trigger logic
+        profile_data["onboarding_status"] = "skipped"
+        profile_data["onboarding_skipped_at"] = datetime.utcnow().isoformat()
+        self.user_profile.profile_data = profile_data
+
+        # Update workflow state
+        workflow.status = "skipped" # Or "completed_by_skip"
+        workflow.current_stage = "skipped"
+        workflow.add_history_event(
+            event_type="WORKFLOW_SKIPPED",
+            message="Onboarding workflow was skipped by the user.",
+            stage=workflow.current_stage # Current stage before skip
+        )
+        workflow.update_timestamp()
+
+        # Move to completed workflows
+        if workflow.workflow_id in self.app_state.active_workflows:
+            self.app_state.completed_workflows.append(
+                self.app_state.active_workflows.pop(workflow.workflow_id)
+            )
+        
+        log.info(f"User {self.user_profile.user_id} skipped onboarding workflow {workflow_id}.")
+        
+        return {
+            "success": True,
+            "skipped": True,
+            "message": "🚀 Onboarding skipped! You can manage preferences later with `@augie preferences`. How can I help you now?",
+            "profile_updated": True
+        }
 
 def get_active_onboarding_workflow(app_state: AppState, user_id: str) -> Optional[WorkflowContext]:
     """Gets the active onboarding workflow for a user, if any."""

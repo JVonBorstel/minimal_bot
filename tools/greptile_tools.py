@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Dict, Any, Optional, List, Tuple, Union
 import time
+import asyncio
 from unittest.mock import MagicMock
 import sys
 
@@ -117,7 +118,7 @@ class GreptileTools:
             
         return url.strip()
 
-    def _send_request(
+    async def _send_request(
         self,
         endpoint: str,
         method: str = "GET",
@@ -199,7 +200,7 @@ class GreptileTools:
                         if attempt < retries:
                             retry_after = int(response.headers.get("Retry-After", 2))
                             log.warning(f"Rate limit exceeded, retrying after {retry_after} seconds")
-                            time.sleep(retry_after)
+                            await asyncio.sleep(retry_after)
                             attempt += 1
                             continue
                         else:
@@ -225,7 +226,7 @@ class GreptileTools:
                 if attempt < retries:
                     backoff = 2 ** attempt  # Exponential backoff
                     log.warning(f"Request failed, retrying in {backoff} seconds: {str(e)}")
-                    time.sleep(backoff)
+                    await asyncio.sleep(backoff)
                     attempt += 1
                 else:
                     log.error(f"Request failed after {retries} retries: {str(e)}")
@@ -274,7 +275,7 @@ class GreptileTools:
         name="greptile_query_codebase",
         description="Answers natural language questions about a targeted GitHub repository using Greptile's AI analysis. Can focus queries on specific files/directories. Requires repository URL.",
     )
-    def query_codebase(
+    async def query_codebase(
         self, query: str, github_repo_url: str, focus_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -306,7 +307,7 @@ class GreptileTools:
         }
         
         try:
-            response = self._send_request(endpoint="query", method="POST", data=payload)
+            response = await self._send_request(endpoint="query", method="POST", data=payload)
             log.info(f"Received answer from Greptile for query on {repo_url}")
             
             # Use the message field as the answer
@@ -383,7 +384,7 @@ class GreptileTools:
         name="greptile_summarize_repo",
         description="Provides a high-level overview of a Greptile-indexed repository's architecture, key modules, and entrypoints using an AI query. Requires repository URL.",
     )
-    def summarize_repo(self, repo_url: str) -> Dict[str, Any]:
+    async def summarize_repo(self, repo_url: str) -> Dict[str, Any]:
         """
         Provides a high-level overview of a repository's architecture, key modules, and entrypoints.
         """
@@ -402,7 +403,7 @@ class GreptileTools:
         log.info(f"Generating repository summary for: {repo_url}")
         
         try:
-            result = self.query_codebase(summary_query, repo_url)
+            result = await self.query_codebase(summary_query, repo_url)
             
             if result.get("status") == "SUCCESS":
                 return {

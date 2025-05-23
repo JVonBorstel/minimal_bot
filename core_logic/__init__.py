@@ -12,7 +12,7 @@ _project_root_dir_path = os.path.dirname(_core_logic_dir_path) # Assumes core_lo
 if _project_root_dir_path not in sys.path:
     sys.path.insert(0, _project_root_dir_path)
     # print(f"DEBUG: Added project root '{_project_root_dir_path}' to sys.path in core_logic.__init__") # Optional debug
-    print(f"DEBUG: sys.path in {__file__} after modification: {sys.path}") # ADDED FOR DEBUGGING
+    # print(f"DEBUG: sys.path in {__file__} after modification: {sys.path}") # ADDED FOR DEBUGGING
 # --- End Robust Path Setup ---
 
 from .constants import MAX_TOOL_CYCLES_OUTER # Example

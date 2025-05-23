@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sys
 import os
+import pytest # Add pytest import
 
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +25,8 @@ log = logging.getLogger("test_help_permissions")
 # Permission levels to test
 PERMISSION_LEVELS = ["ADMIN", "DEVELOPER", "STAKEHOLDER", "DEFAULT"]
 
+@pytest.mark.parametrize("permission_level", PERMISSION_LEVELS)
+@pytest.mark.asyncio
 async def test_help_for_permission_level(permission_level):
     """Test help tool for a specific permission level."""
     print(f"\n🔍 TESTING HELP FOR {permission_level} USER")
@@ -98,6 +101,7 @@ async def test_help_for_permission_level(permission_level):
         log.error(f"Permission test exception for {permission_level}: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_consistency_across_permissions():
     """Test that help content is consistent across different permission levels."""
     print("\n🔍 TESTING HELP CONSISTENCY ACROSS PERMISSIONS")
@@ -182,6 +186,7 @@ async def test_help_consistency_across_permissions():
         log.error(f"Consistency test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_performance_by_permission():
     """Test help tool performance across different permission levels."""
     print("\n🔍 TESTING HELP PERFORMANCE BY PERMISSION")
@@ -254,6 +259,7 @@ async def test_help_performance_by_permission():
         log.error(f"Performance test exception: {e}", exc_info=True)
         return False
 
+@pytest.mark.asyncio
 async def test_help_error_handling():
     """Test help tool error handling with invalid user scenarios."""
     print("\n🔍 TESTING HELP ERROR HANDLING")

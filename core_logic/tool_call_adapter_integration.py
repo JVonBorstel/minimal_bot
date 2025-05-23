@@ -16,6 +16,11 @@ from state_models import AppState, ScratchpadEntry
 from tools.tool_executor import ToolExecutor
 from core_logic.tool_call_adapter import ToolCallAdapter
 
+# Import for saving UserProfile
+from user_auth import db_manager # For saving UserProfile
+from user_auth.utils import _user_profile_cache, _cache_lock # For updating cache
+import time # For cache timestamp
+
 log = logging.getLogger("core_logic.tool_call_adapter_integration")
 
 async def process_service_tool_calls(
@@ -42,7 +47,7 @@ async def process_service_tool_calls(
     has_critical_error = False
     
     # Initialize the ToolCallAdapter
-    adapter = ToolCallAdapter(tool_executor)
+    adapter = ToolCallAdapter(tool_executor, config)
     log.info(f"Processing {len(tool_calls)} service-level tool calls using ToolCallAdapter")
     
     for idx, tool_call in enumerate(tool_calls):
@@ -150,12 +155,37 @@ async def process_service_tool_calls(
         # Prepare tool call for the adapter
         adapter_tool_call = {
             "name": service_name,
-            "params": args_dict
+            "params": args_dict,
+            "id": tool_call_id
         }
         
         try:
             # Use the adapter to process the service-level call and execute the appropriate detailed tool
-            result = await adapter.process_llm_tool_call(adapter_tool_call)
+            result = await adapter.process_llm_tool_call(adapter_tool_call, app_state)
+            
+            # --- Save UserProfile if metrics were updated by the adapter ---
+            # The _record_selection_outcome method in ToolCallAdapter updates app_state.current_user.tool_adapter_metrics.
+            # We need to persist this UserProfile change.
+            if app_state and app_state.current_user and hasattr(app_state.current_user, 'tool_adapter_metrics'):
+                # Assuming _record_selection_outcome was called if app_state was provided to process_llm_tool_call
+                # and metrics are part of current_user. A more explicit flag from _record_selection_outcome would be robust.
+                try:
+                    user_profile_data = app_state.current_user.model_dump(mode='json')
+                    if db_manager.save_user_profile(user_profile_data):
+                        log.info(f"Saved updated UserProfile (with tool metrics) for {app_state.current_user.user_id} after adapter call.")
+                        # Update cache as well
+                        with _cache_lock:
+                            _user_profile_cache.put(
+                                app_state.current_user.user_id,
+                                user_profile_data, # The dumped data
+                                time.time()
+                            )
+                            log.debug(f"Updated UserProfile cache for {app_state.current_user.user_id}.")
+                    else:
+                        log.error(f"Failed to save updated UserProfile for {app_state.current_user.user_id} after adapter call.")
+                except Exception as e_save_profile:
+                    log.error(f"Error saving/caching UserProfile after adapter call for {app_state.current_user.user_id if app_state.current_user else 'UnknownUser'}: {e_save_profile}", exc_info=True)
+            # --- End UserProfile Save ---
             
             # Check if the result indicates an error
             is_error = False
@@ -267,14 +297,15 @@ async def process_service_tool_calls(
     
     return tool_result_messages, internal_messages, has_critical_error
 
-def create_tool_adapter_for_executor(tool_executor: ToolExecutor) -> ToolCallAdapter:
+def create_tool_adapter_for_executor(tool_executor: ToolExecutor, config: Config) -> ToolCallAdapter:
     """
     Create a ToolCallAdapter instance for the given tool executor.
     
     Args:
         tool_executor: The ToolExecutor to use for executing detailed tools.
+        config: The application configuration.
     
     Returns:
         A ToolCallAdapter instance.
     """
-    return ToolCallAdapter(tool_executor) 
+    return ToolCallAdapter(tool_executor, config) 

@@ -125,9 +125,9 @@ def check_repository_status(config, repo_url: str, branch: str = "main") -> Dict
         print(f"❌ Error checking status: {e}")
         return {"status": "ERROR", "error": str(e)}
 
-def test_simple_query(config, repo_url: str) -> bool:
+def _run_simple_greptile_query(config, repo_url: str) -> bool:
     """Test a simple query against the indexed repository."""
-    print_step("Test Simple Query", 3)
+    print_step("Run Simple Query", 3) # Renamed step for clarity
     
     try:
         greptile_tools = GreptileTools(config)
@@ -182,7 +182,7 @@ async def main():
                 
                 if status_info.get("status") in ["COMPLETED", "PROCESSING"]:
                     # Step 3: Test query (regardless of status - might work)
-                    if test_simple_query(config, repo_url):
+                    if _run_simple_greptile_query(config, repo_url):
                         print(f"🎉 SUCCESS! Repository {repo_url} works with Greptile!")
                         
                         print_banner("GREPTILE TOOLS VALIDATION: SUCCESS!")

@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Dict, Any, List
 from datetime import datetime
+import pytest # Add pytest
 
 from config import get_config
 from state_models import AppState
@@ -61,6 +62,7 @@ class MultiServiceIntelligenceValidator:
             print(f"❌ Error creating test user: {e}")
             return False
             
+    @pytest.mark.asyncio
     async def test_multi_service_intelligence(self, query: str, expected_services: List[str], scenario_name: str) -> Dict[str, Any]:
         """Test the bot's intelligence for a specific multi-service scenario."""
         print(f"\n🧠 TESTING INTELLIGENCE: {scenario_name}")
@@ -204,6 +206,7 @@ class MultiServiceIntelligenceValidator:
                 "timestamp": datetime.now().isoformat()
             }
             
+    @pytest.mark.asyncio
     async def test_intelligence_scenarios(self) -> bool:
         """Test various multi-service intelligence scenarios."""
         print("\n🧠 TESTING MULTI-SERVICE INTELLIGENCE SCENARIOS")

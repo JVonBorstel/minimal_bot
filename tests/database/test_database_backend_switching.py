@@ -16,6 +16,7 @@ import json
 import time
 import pprint
 from typing import Dict, Any, Optional
+import pytest # Add pytest
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,6 +66,7 @@ class BackendSwitchingTester:
         print(f"{status} {test_name}: {details}")
         logger.info(f"Test result - {test_name}: {'PASS' if success else 'FAIL'} - {details}")
         
+    @pytest.mark.asyncio
     async def test_sqlite_backend_operations(self):
         """Test SQLite backend with real operations."""
         print("🔍 TESTING SQLITE BACKEND OPERATIONS")
@@ -163,6 +165,7 @@ class BackendSwitchingTester:
             logger.error("SQLite backend test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_redis_backend_operations(self):
         """Test Redis backend with real operations."""
         if not REDIS_AVAILABLE:
@@ -258,6 +261,7 @@ class BackendSwitchingTester:
             logger.error("Redis backend test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_data_migration_sqlite_to_redis(self):
         """Test migrating data from SQLite to Redis."""
         if not REDIS_AVAILABLE or not self.sqlite_storage or not self.redis_storage:
@@ -315,6 +319,7 @@ class BackendSwitchingTester:
             logger.error("Data migration test failed", exc_info=True)
             return False
     
+    @pytest.mark.asyncio
     async def test_backend_performance_comparison(self):
         """Compare performance between SQLite and Redis."""
         print("⚡ TESTING BACKEND PERFORMANCE COMPARISON")

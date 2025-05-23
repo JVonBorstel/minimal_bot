@@ -5,6 +5,7 @@ This validates the bot's ability to intelligently select appropriate tools for q
 """
 
 import asyncio
+import pytest # Add pytest
 from typing import List, Dict, Any
 from config import get_config
 from user_auth.models import UserProfile
@@ -13,6 +14,7 @@ from core_logic.tool_selector import ToolSelector
 from state_models import AppState
 import time
 
+@pytest.mark.asyncio
 async def test_triage_intelligence():
     print("🧠 FOCUSED TRIAGE INTELLIGENCE TEST")
     print("=" * 50)

@@ -6,12 +6,14 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
+import pytest # Add pytest
 from unittest.mock import Mock, AsyncMock
 from bot_core.my_bot import MyBot
 from config import Config
 from botbuilder.schema import Activity, ActivityTypes, ChannelAccount
 from botbuilder.core import TurnContext
 
+@pytest.mark.asyncio
 async def test_bot_message_processing():
     """Test that the bot can process a message without throwing TypeError."""
     
@@ -21,6 +23,9 @@ async def test_bot_message_processing():
     config.GEMINI_MODEL = "test-model"
     config.settings = Mock()
     config.settings.memory_type = "sqlite"
+    config.TOOL_SELECTOR = Mock()
+    config.TOOL_SELECTOR.get.return_value = "all-MiniLM-L6-v2"
+    config.DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
     
     # Create the bot
     bot = MyBot(config)
