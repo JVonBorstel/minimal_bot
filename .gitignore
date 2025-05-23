@@ -94,16 +94,10 @@ requirements-minimal.txt
 pytest.ini
 .pytest_cache/
 
-# Alembic (if not using migrations in production)
-# alembic/
-# alembic.ini
-
-# Railway specific (might already be there)
-railway.toml
-
-# Docker (if not using Docker deployment)
-# Dockerfile
-# docker-compose.yml
+# Railway and Docker are NEEDED for deployment
+# alembic/ - NEEDED for database migrations  
+# railway.toml - NEEDED for Railway config
+# Dockerfile - NEEDED for Railway builds
 
 # IDE and editor files
 .vscode/
