@@ -132,6 +132,73 @@ class WorkflowOrchestrator:
                     parameters={"query": "{search_query}"},
                     description="Search the web for information"
                 )
+            ],
+            
+            "create_jira_story": [
+                WorkflowStep(
+                    step_id="create_story",
+                    tool_name="jira_create_story",
+                    parameters={
+                        "summary": "{story_summary}",
+                        "description": "{story_description}",
+                        "template": "{story_template}",
+                        "issue_type": "{issue_type}",
+                        "priority": "{priority}",
+                        "assignee_email": "{assignee_email}",
+                        "labels": "{labels}",
+                        "story_points": "{story_points}"
+                    },
+                    description="Create a new Jira story with template support"
+                )
+            ],
+            
+            "create_user_story": [
+                WorkflowStep(
+                    step_id="create_user_story",
+                    tool_name="jira_create_story",
+                    parameters={
+                        "summary": "{story_summary}",
+                        "description": "{story_description}",
+                        "template": "user_story",
+                        "issue_type": "Story",
+                        "priority": "{priority}",
+                        "assignee_email": "{assignee_email}",
+                        "story_points": "{story_points}"
+                    },
+                    description="Create a user story with structured template"
+                )
+            ],
+            
+            "create_bug_ticket": [
+                WorkflowStep(
+                    step_id="create_bug",
+                    tool_name="jira_create_story",
+                    parameters={
+                        "summary": "{story_summary}",
+                        "description": "{story_description}",
+                        "template": "bug_fix",
+                        "issue_type": "Bug",
+                        "priority": "{priority}",
+                        "assignee_email": "{assignee_email}"
+                    },
+                    description="Create a bug ticket with structured template"
+                )
+            ],
+            
+            "create_tech_debt_ticket": [
+                WorkflowStep(
+                    step_id="create_tech_debt",
+                    tool_name="jira_create_story",
+                    parameters={
+                        "summary": "{story_summary}",
+                        "description": "{story_description}",
+                        "template": "tech_debt",
+                        "issue_type": "Task",
+                        "priority": "{priority}",
+                        "assignee_email": "{assignee_email}"
+                    },
+                    description="Create a technical debt ticket"
+                )
             ]
         }
     
@@ -270,17 +337,28 @@ class WorkflowOrchestrator:
                 elif ref == "search_query":
                     # Extract search query from the user's latest message
                     search_query = "general search"  # default
-                    if app_state.messages and app_state.messages[-1].get("role") == "user":
-                        user_message = app_state.messages[-1].get("content", "")
-                        # Remove common command words to extract the actual search terms
-                        search_words = ["search", "find", "look for", "locate", "grep", "google", "what is", "who is", "tell me about"]
-                        search_query = user_message.lower()
-                        for word in search_words:
-                            search_query = search_query.replace(word, "").strip()
-                        search_query = search_query or user_message  # fallback to full message
+                    if app_state.messages and len(app_state.messages) > 0:
+                        last_message = app_state.messages[-1]
+                        if hasattr(last_message, 'role') and last_message.role == "user":
+                            # Use the text property which handles our Message model correctly
+                            user_message = getattr(last_message, 'text', '') or getattr(last_message, 'raw_text', '')
+                            if user_message:
+                                # Remove common command words to extract the actual search terms
+                                search_words = ["search", "find", "look for", "locate", "grep", "google", "what is", "who is", "tell me about", "use", "perplexity", "web"]
+                                search_query = user_message.lower()
+                                for word in search_words:
+                                    search_query = search_query.replace(word, "").strip()
+                                search_query = search_query or user_message  # fallback to full message
+                                # Clean up extra whitespace
+                                search_query = " ".join(search_query.split())
                     
                     injected[key] = search_query
                     log.info(f"Injected search_query: {search_query}")
+                elif ref in ["story_summary", "story_description", "story_template", "issue_type", "priority", "assignee_email", "labels", "story_points"]:
+                    # Extract story creation parameters from user message
+                    injected_value = self._extract_story_parameter(ref, app_state, context)
+                    injected[key] = injected_value
+                    log.info(f"Injected {ref}: {injected_value}")
                 elif "." in ref:
                     # Reference to previous step result
                     step_id, field = ref.split(".", 1)
@@ -299,6 +377,192 @@ class WorkflowOrchestrator:
                 injected[key] = value
         
         return injected
+    
+    def _extract_story_parameter(self, parameter: str, app_state: AppState, context: Dict[str, Any]) -> Any:
+        """
+        Extract story creation parameters from user message using intelligent parsing.
+        
+        Args:
+            parameter: The parameter to extract (story_summary, story_description, etc.)
+            app_state: Application state containing messages
+            context: Additional context
+            
+        Returns:
+            Extracted parameter value or intelligent default
+        """
+        user_message = ""
+        if app_state.messages and len(app_state.messages) > 0:
+            last_message = app_state.messages[-1]
+            if hasattr(last_message, 'role') and last_message.role == "user":
+                user_message = getattr(last_message, 'text', '') or getattr(last_message, 'raw_text', '')
+        
+        # Check context first for explicit values
+        if parameter in context and context[parameter]:
+            return context[parameter]
+        
+        if parameter == "story_summary":
+            # Extract summary from user message
+            # Look for patterns like "create story: title" or "add task: title"
+            summary_patterns = [
+                r"create\s+(?:story|task|ticket|issue):\s*(.+)",
+                r"add\s+(?:story|task|ticket|issue):\s*(.+)",
+                r"new\s+(?:story|task|ticket|issue):\s*(.+)",
+                r"(?:story|task|ticket|issue)\s+for\s+(.+)",
+                r"(?:story|task|ticket|issue)\s+to\s+(.+)"
+            ]
+            
+            import re
+            for pattern in summary_patterns:
+                match = re.search(pattern, user_message.lower())
+                if match:
+                    # Take only the part immediately after the colon, before additional details
+                    full_match = match.group(1).strip()
+                    # Split by common separators for additional details
+                    summary_parts = re.split(r'\s+(?:with|and|#|assign|priority|points|estimate)', full_match, 1)
+                    return summary_parts[0].strip().title()
+            
+            # Fallback: extract meaningful part after common command words
+            command_words = ["create", "add", "new", "make", "build", "story", "task", "ticket", "issue", "jira"]
+            clean_message = user_message.lower()
+            for word in command_words:
+                clean_message = clean_message.replace(word, "").strip()
+            
+            if clean_message:
+                # Take first part before additional details and limit to 80 characters
+                clean_parts = re.split(r'\s+(?:with|and|#|assign|priority|points|estimate)', clean_message, 1)
+                return clean_parts[0][:80].strip().title()
+            
+            return "New Story"
+        
+        elif parameter == "story_description":
+            # Look for description patterns or use full message as description
+            desc_patterns = [
+                r"description:\s*(.+)",
+                r"details:\s*(.+)",
+                r"requirement:\s*(.+)"
+            ]
+            
+            import re
+            for pattern in desc_patterns:
+                match = re.search(pattern, user_message.lower())
+                if match:
+                    return match.group(1).strip()
+            
+            # Use full message as description if no specific pattern found
+            return user_message if user_message else "Story description"
+        
+        elif parameter == "story_template":
+            # Detect template from keywords in message
+            template_keywords = {
+                "user_story": ["user story", "as a user", "user wants", "user needs"],
+                "bug_fix": ["bug", "issue", "problem", "fix", "broken", "error"],
+                "tech_debt": ["tech debt", "technical debt", "refactor", "cleanup", "improve"],
+                "research": ["research", "investigate", "explore", "spike", "poc", "proof of concept"]
+            }
+            
+            message_lower = user_message.lower()
+            for template, keywords in template_keywords.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    return template
+            
+            return "custom"
+        
+        elif parameter == "issue_type":
+            # Detect issue type from keywords
+            type_keywords = {
+                "Bug": ["bug", "issue", "problem", "fix", "broken", "error"],
+                "Epic": ["epic", "large", "major", "big"],
+                "Task": ["task", "todo", "work", "do", "tech debt", "technical debt", "refactor", "cleanup"],
+                "Story": ["story", "feature", "requirement", "user"]
+            }
+            
+            message_lower = user_message.lower()
+            
+            # Check for tech debt specifically first since it should be a Task
+            if any(tech_word in message_lower for tech_word in ["tech debt", "technical debt"]):
+                return "Task"
+            
+            for issue_type, keywords in type_keywords.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    return issue_type
+            
+            return "Story"  # Default
+        
+        elif parameter == "priority":
+            # Detect priority from keywords
+            priority_keywords = {
+                "Highest": ["critical", "urgent", "asap", "emergency", "highest"],
+                "High": ["high", "important", "soon"],
+                "Medium": ["medium", "normal", "regular"],
+                "Low": ["low", "minor", "whenever"],
+                "Lowest": ["lowest", "someday", "nice to have"]
+            }
+            
+            message_lower = user_message.lower()
+            for priority, keywords in priority_keywords.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    return priority
+            
+            return "Medium"  # Default
+        
+        elif parameter == "assignee_email":
+            # Look for email patterns or assignee mentions
+            import re
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            email_match = re.search(email_pattern, user_message)
+            if email_match:
+                return email_match.group()
+            
+            # Look for "assign to" patterns
+            assign_patterns = [
+                r"assign\s+to\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})",
+                r"assignee:\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})"
+            ]
+            
+            for pattern in assign_patterns:
+                match = re.search(pattern, user_message.lower())
+                if match:
+                    return match.group(1)
+            
+            return None  # No assignee
+        
+        elif parameter == "labels":
+            # Extract labels from hashtags or label patterns
+            import re
+            hashtag_pattern = r'#(\w+)'
+            hashtags = re.findall(hashtag_pattern, user_message)
+            
+            if hashtags:
+                return hashtags
+            
+            # Look for "labels:" pattern
+            label_pattern = r'labels?:\s*([^,\n]+)'
+            label_match = re.search(label_pattern, user_message.lower())
+            if label_match:
+                labels_text = label_match.group(1)
+                return [label.strip() for label in labels_text.split(',')]
+            
+            return []  # No labels
+        
+        elif parameter == "story_points":
+            # Look for story points patterns
+            import re
+            points_patterns = [
+                r'(\d+)\s*(?:points?|pts?)',
+                r'points?:\s*(\d+)',
+                r'estimate:\s*(\d+)',
+                r'effort:\s*(\d+)'
+            ]
+            
+            for pattern in points_patterns:
+                match = re.search(pattern, user_message.lower())
+                if match:
+                    return int(match.group(1))
+            
+            return None  # No story points
+        
+        # Default fallback
+        return None
     
     def _determine_success(self, result: Any) -> bool:
         """Determine if a tool execution was successful."""
@@ -332,6 +596,14 @@ class WorkflowOrchestrator:
             return self._synthesize_search_code(results)
         elif workflow_type == "web_search":
             return self._synthesize_web_search(results)
+        elif workflow_type == "create_jira_story":
+            return self._synthesize_create_jira_story(results)
+        elif workflow_type == "create_user_story":
+            return self._synthesize_create_user_story(results)
+        elif workflow_type == "create_bug_ticket":
+            return self._synthesize_create_bug_ticket(results)
+        elif workflow_type == "create_tech_debt_ticket":
+            return self._synthesize_create_tech_debt_ticket(results)
         else:
             # Generic synthesis
             return self._generic_synthesis(results)
@@ -494,8 +766,96 @@ class WorkflowOrchestrator:
         synthesis.append("🌐 **Web Search Results**")
         
         if search_result:
-            search_data = search_result.get("data", []) if isinstance(search_result, dict) else search_result
-            synthesis.append(f"🔍 Found {len(search_data) if isinstance(search_data, list) else 0} search results")
+            # Check if this is a successful result with data
+            if isinstance(search_result, dict):
+                if search_result.get("status") == "SUCCESS":
+                    data = search_result.get("data", {})
+                    if isinstance(data, dict):
+                        answer = data.get("answer", "")
+                        sources = data.get("sources", [])
+                        
+                        if answer:
+                            synthesis.append(f"📝 **Answer:** {answer}")
+                        
+                        if sources and len(sources) > 0:
+                            synthesis.append(f"\n🔗 **Sources ({len(sources)} found):**")
+                            for i, source in enumerate(sources[:5], 1):  # Show up to 5 sources
+                                if isinstance(source, dict):
+                                    title = source.get("title", "Unknown")
+                                    url = source.get("url", "")
+                                    synthesis.append(f"{i}. [{title}]({url})" if url else f"{i}. {title}")
+                        else:
+                            synthesis.append("🔍 Search completed successfully but no sources found.")
+                    else:
+                        synthesis.append("🔍 Search completed successfully.")
+                else:
+                    # Handle error status
+                    error_msg = search_result.get("message", "Unknown error")
+                    synthesis.append(f"❌ Search failed: {error_msg}")
+            else:
+                synthesis.append("🔍 Search completed.")
+        else:
+            synthesis.append("❌ No search results available.")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_create_jira_story(self, results: Dict[str, Any]) -> str:
+        """Synthesize create Jira story results."""
+        story_result = results.get("create_story", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("🎫 **Jira Story Creation Results**")
+        
+        if story_result:
+            story_data = story_result.get("data", {}) if isinstance(story_result, dict) else {}
+            synthesis.append(f"📋 Story: {story_data.get('key', 'Unknown')} - {story_data.get('summary', 'No summary')}")
+        else:
+            synthesis.append("❌ Story creation failed")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_create_user_story(self, results: Dict[str, Any]) -> str:
+        """Synthesize create user story results."""
+        story_result = results.get("create_user_story", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("🎫 **User Story Creation Results**")
+        
+        if story_result:
+            story_data = story_result.get("data", {}) if isinstance(story_result, dict) else {}
+            synthesis.append(f"📋 Story: {story_data.get('key', 'Unknown')} - {story_data.get('summary', 'No summary')}")
+        else:
+            synthesis.append("❌ User story creation failed")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_create_bug_ticket(self, results: Dict[str, Any]) -> str:
+        """Synthesize create bug ticket results."""
+        bug_result = results.get("create_bug", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("🎫 **Bug Ticket Creation Results**")
+        
+        if bug_result:
+            bug_data = bug_result.get("data", {}) if isinstance(bug_result, dict) else {}
+            synthesis.append(f"📋 Bug: {bug_data.get('key', 'Unknown')} - {bug_data.get('summary', 'No summary')}")
+        else:
+            synthesis.append("❌ Bug ticket creation failed")
+        
+        return "\n".join(synthesis)
+    
+    def _synthesize_create_tech_debt_ticket(self, results: Dict[str, Any]) -> str:
+        """Synthesize create technical debt ticket results."""
+        tech_debt_result = results.get("create_tech_debt", {}).get("result", {})
+        
+        synthesis = []
+        synthesis.append("🎫 **Technical Debt Ticket Creation Results**")
+        
+        if tech_debt_result:
+            tech_debt_data = tech_debt_result.get("data", {}) if isinstance(tech_debt_result, dict) else {}
+            synthesis.append(f"📋 Technical Debt: {tech_debt_data.get('key', 'Unknown')} - {tech_debt_data.get('summary', 'No summary')}")
+        else:
+            synthesis.append("❌ Technical debt ticket creation failed")
         
         return "\n".join(synthesis)
     
@@ -562,7 +922,29 @@ WORKFLOW_PATTERNS = {
     "web_search": [
         "search web", "google", "look up", "find information",
         "research", "what is", "who is", "when did", "how to",
-        "search for", "find out", "tell me about"
+        "search for", "find out", "tell me about", "weather", "tell me", "can you tell me"
+    ],
+    "create_jira_story": [
+        "create story", "new story", "add story", "make story",
+        "create ticket", "new ticket", "add ticket", "make ticket",
+        "create issue", "new issue", "add issue", "make issue",
+        "create task", "new task", "add task", "make task",
+        "jira story", "jira ticket", "jira issue", "jira task"
+    ],
+    "create_user_story": [
+        "create user story", "new user story", "add user story",
+        "user story for", "as a user", "user wants", "user needs",
+        "user story template", "structured story"
+    ],
+    "create_bug_ticket": [
+        "create bug", "new bug", "add bug", "report bug",
+        "bug ticket", "bug report", "bug issue", "fix bug",
+        "broken", "error", "problem", "issue with"
+    ],
+    "create_tech_debt_ticket": [
+        "create tech debt", "technical debt", "refactor",
+        "cleanup", "improve code", "code improvement",
+        "tech debt ticket", "refactoring task"
     ]
 }
 
@@ -610,12 +992,32 @@ def detect_workflow_intent(user_query: str) -> Optional[str]:
         return "search_code"
     
     # Web search requests
-    web_search_keywords = ["what is", "who is", "when", "how", "why", "google", "search", "find information", "look up", "research"]
+    web_search_keywords = ["what is", "who is", "when", "how", "why", "google", "search", "find information", "look up", "research", "weather", "tell me", "can you tell me"]
     if any(keyword in query_lower for keyword in web_search_keywords):
         # Don't trigger for code-related searches
         if not any(target in query_lower for target in code_targets + github_keywords):
             log.info(f"Detected workflow intent: web_search from query: {user_query}")
             return "web_search"
+    
+    # Jira story creation requests
+    create_keywords = ["create", "new", "add", "make"]
+    story_keywords = ["story", "ticket", "issue", "task"]
+    
+    if any(create_word in query_lower for create_word in create_keywords) and any(story_word in query_lower for story_word in story_keywords):
+        # Check for specific story types
+        if "user story" in query_lower or "as a user" in query_lower:
+            log.info(f"Detected workflow intent: create_user_story from query: {user_query}")
+            return "create_user_story"
+        elif any(bug_word in query_lower for bug_word in ["bug", "broken", "error", "problem", "fix"]):
+            log.info(f"Detected workflow intent: create_bug_ticket from query: {user_query}")
+            return "create_bug_ticket"
+        elif any(tech_word in query_lower for tech_word in ["tech debt", "technical debt", "refactor", "cleanup"]):
+            log.info(f"Detected workflow intent: create_tech_debt_ticket from query: {user_query}")
+            return "create_tech_debt_ticket"
+        else:
+            # Generic story creation
+            log.info(f"Detected workflow intent: create_jira_story from query: {user_query}")
+            return "create_jira_story"
     
     # Fallback: check original specific patterns
     for workflow_type, patterns in WORKFLOW_PATTERNS.items():

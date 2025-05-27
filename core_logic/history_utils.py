@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional, Tuple, TypeAlias, Union
 import sys
 import os
 from importlib import import_module
+import uuid
 
 # Renamed 'state' to 'state_models' as per project structure and migration plan
 from state_models import AppState, ScratchpadEntry, Message  # Corrected import
@@ -352,7 +353,7 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
         log.debug(note, extra={"event_type": "history_truncation", "details": {"original_count": len(app_state.messages), "truncated_count": len(history_to_convert)}})
         preparation_notes.append(note)
 
-    for msg_from_history in history_to_convert:
+    for msg_index, msg_from_history in enumerate(history_to_convert):
         # msg_from_history is AppState.Message Pydantic model
         sdk_parts = []
         for part_data in msg_from_history.parts: # msg_from_history.parts is List[MessagePart]
@@ -375,8 +376,8 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
                 )))
             # Add other part types if you use them (inline_data, file_data etc.)
             # else:
-            #     note = f"Unsupported part type '{part_data.type}' in message {msg_from_history.id}. Skipping part."
-            #     log.warning(note, extra={"event_type": "unsupported_message_part_type", "details": {"message_id": msg_from_history.id, "part_type": part_data.type}})
+            #     note = f"Unsupported part type '{part_data.type}' in message {msg_index}. Skipping part."
+            #     log.warning(note, extra={"event_type": "unsupported_message_part_type", "details": {"message_index": msg_index, "part_type": part_data.type}})
             #     preparation_notes.append(note)
         
         if sdk_parts:
@@ -389,19 +390,19 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
                 # Let's assume for now we map system messages with text to 'model' for context.
                 # If the system message was only for internal logging, it might have is_internal=True
                 if msg_from_history.is_internal:
-                    note = f"Skipping internal system message {msg_from_history.id} for LLM history."
-                    log.debug(note, extra={"event_type": "skip_internal_system_message", "details": {"message_id": msg_from_history.id}})
+                    note = f"Skipping internal system message at index {msg_index} for LLM history."
+                    log.debug(note, extra={"event_type": "skip_internal_system_message", "details": {"message_index": msg_index}})
                     preparation_notes.append(note)
                     continue # Skip this system message
                 role_for_sdk = "model" # Or filter out: continue
-                note = f"Mapping system message {msg_from_history.id} to role 'model' for LLM history."
-                log.debug(note, extra={"event_type": "map_system_to_model", "details": {"message_id": msg_from_history.id}})
+                note = f"Mapping system message at index {msg_index} to role 'model' for LLM history."
+                log.debug(note, extra={"event_type": "map_system_to_model", "details": {"message_index": msg_index}})
                 preparation_notes.append(note)
 
             formatted_messages.append(glm.Content(parts=sdk_parts, role=role_for_sdk))
         else:
-            note = f"Message {msg_from_history.id} (role '{msg_from_history.role}') had no convertible parts. Skipping message."
-            log.warning(note, extra={"event_type": "message_no_convertible_parts", "details": {"message_id": msg_from_history.id, "role": msg_from_history.role}})
+            note = f"Message at index {msg_index} (role '{msg_from_history.role}') had no convertible parts. Skipping message."
+            log.warning(note, extra={"event_type": "message_no_convertible_parts", "details": {"message_index": msg_index, "role": msg_from_history.role}})
             preparation_notes.append(note)
             
     # Basic sequence validation/repair (simplified from guide for now)
@@ -439,8 +440,50 @@ def _prepare_history_for_llm(
     """
     preparation_errors = []
 
-    filtered_msgs = []
+    # CRITICAL FIX: Handle both Message objects and dictionaries
+    normalized_messages = []
     for msg in session_messages:
+        if hasattr(msg, 'model_dump'):  # Pydantic Message object
+            try:
+                # Convert Message object to dictionary
+                msg_dict = msg.model_dump()
+                # Ensure backward compatibility attributes
+                if not msg_dict.get('id'):
+                    msg_dict['id'] = getattr(msg, 'id', str(uuid.uuid4()))
+                normalized_messages.append(msg_dict)
+            except Exception as e:
+                log.warning(f"Failed to convert Message object to dict: {e}. Using fallback conversion.")
+                # Fallback conversion
+                msg_dict = {
+                    'id': getattr(msg, 'id', str(uuid.uuid4())),
+                    'role': getattr(msg, 'role', 'user'),
+                    'content': getattr(msg, 'text', str(msg)),
+                    'timestamp': getattr(msg, 'timestamp', time.time()),
+                    'is_internal': getattr(msg, 'is_internal', False),
+                    'message_type': getattr(msg, 'message_type', None),
+                }
+                normalized_messages.append(msg_dict)
+        elif isinstance(msg, dict):
+            # Already a dictionary, ensure it has required fields
+            msg_dict = msg.copy()
+            if 'id' not in msg_dict:
+                msg_dict['id'] = str(uuid.uuid4())
+            normalized_messages.append(msg_dict)
+        else:
+            # Unknown message format, create safe fallback
+            log.warning(f"Unknown message format: {type(msg)}. Creating fallback message.")
+            msg_dict = {
+                'id': str(uuid.uuid4()),
+                'role': 'user',
+                'content': str(msg),
+                'timestamp': time.time(),
+                'is_internal': False,
+                'message_type': None,
+            }
+            normalized_messages.append(msg_dict)
+
+    filtered_msgs = []
+    for msg in normalized_messages:
         role = msg.get("role", "")
         is_internal = msg.get("is_internal", False)
         message_type = msg.get("message_type", "")
@@ -486,6 +529,7 @@ def _prepare_history_for_llm(
                 )
 
             scratchpad_message = {
+                "id": str(uuid.uuid4()),
                 "role": "assistant",
                 "content": scratchpad_text,
                 "is_internal": True,

@@ -187,16 +187,12 @@ class LLMInterface:
 
         try:
             # Access schema optimization settings from config
-            # For this revision, we are effectively relaxing these settings by using very large limits
-            # or by not applying the truncation/simplification. The actual config values in config.py
-            # will be addressed later.
             schema_opt_config = self.config.SCHEMA_OPTIMIZATION
-            max_tool_props = 999 # Effectively disable: schema_opt_config.get("max_tool_schema_properties", 12) 
-            max_desc_len = 9999 # Effectively disable: schema_opt_config.get("max_tool_description_length", 150)
-            max_enum_vals = 999 # Effectively disable: schema_opt_config.get("max_tool_enum_values", 8)
-            max_nested_obj_props = 99 # Effectively disable: schema_opt_config.get("max_nested_object_properties", 5)
-            max_array_item_obj_props = 99 # Effectively disable: schema_opt_config.get("max_array_item_properties", 4)
-            # simplify_complex_obj = False # Effectively disable: schema_opt_config.get("flatten_nested_objects", False)
+            max_tool_props = 999 # Effectively disable property limit for now
+            max_desc_len = 9999 # Effectively disable description truncation for now
+            max_enum_vals = 999 # Effectively disable enum limiting for now
+            max_nested_obj_props = 99 # Effectively disable nested object limits for now
+            max_array_item_obj_props = 99 # Effectively disable array item limits for now
             
             schema_props = {}
             required_params = parameters.get("required", [])
@@ -206,13 +202,12 @@ class LLMInterface:
                 log.warning(f"Tool '{tool_name}': Properties is not a dictionary: {type(props)}. Returning empty schema.")
                 return glm.Schema(type_=glm.Type.OBJECT, properties={})
 
-            # Conditional property limiting (effectively disabled with large max_tool_props)
-            if len(props) > max_tool_props:
-                log.warning(f"Tool '{tool_name}' has many properties ({len(props)}). Consider schema optimization if LLM struggles. Current limit: {max_tool_props}.")
-                # Simplified reduction: Keep required, then others up to limit (less likely to trigger now)
-                # ... (original reduction logic can be kept here, but less likely to be hit)
-
             for prop_name, prop_details in props.items():
+                # CRITICAL FIX: Skip AppState and other complex state parameters
+                if prop_name in ['app_state', 'config', 'tool_config'] or 'state' in prop_name.lower():
+                    log.debug(f"Tool '{tool_name}': Skipping complex state parameter '{prop_name}'")
+                    continue
+                    
                 if not isinstance(prop_details, dict):
                     log.warning(f"Tool '{tool_name}': Skipping invalid property '{prop_name}'. Reason: Not a dict. Details: {prop_details}")
                     continue
@@ -222,7 +217,6 @@ class LLMInterface:
                     orig_desc_len = len(prop_details["description"])
                     if orig_desc_len > max_desc_len:
                         prop_details["description"] = prop_details["description"][:max_desc_len-3] + "..."
-                        # log.debug(f"Tool '{tool_name}': Truncated description for property '{prop_name}' from {orig_desc_len} to {max_desc_len} chars") # Less likely
 
                 prop_type_info = prop_details.get("type")
                 is_nullable = prop_details.get("nullable", False)
@@ -230,24 +224,36 @@ class LLMInterface:
 
                 if isinstance(prop_type_info, str):
                     primary_type_str = prop_type_info
-                    if primary_type_str.lower() == "null": is_nullable = True; primary_type_str = "string"
+                    if primary_type_str.lower() == "null": 
+                        is_nullable = True
+                        primary_type_str = "string"
                 elif isinstance(prop_type_info, list):
                     types_in_list = [str(t).lower() for t in prop_type_info] 
-                    if "null" in types_in_list: is_nullable = True
+                    if "null" in types_in_list: 
+                        is_nullable = True
                     non_null_types = [t for t in types_in_list if t != "null"]
-                    if non_null_types: primary_type_str = non_null_types[0]
-                    else: is_nullable = True; primary_type_str = "string"
+                    if non_null_types: 
+                        primary_type_str = non_null_types[0]
+                    else: 
+                        is_nullable = True
+                        primary_type_str = "string"
                 elif "anyOf" in prop_details and isinstance(prop_details.get("anyOf"), list):
                     any_of_types = []
                     for item in prop_details["anyOf"]:
                         if isinstance(item, dict) and "type" in item:
                             item_type = str(item["type"]).lower()
-                            if item_type == "null": is_nullable = True
-                            else: any_of_types.append(item_type)
-                    if any_of_types: primary_type_str = any_of_types[0]
-                    else: is_nullable = True; primary_type_str = "string"
+                            if item_type == "null": 
+                                is_nullable = True
+                            else: 
+                                any_of_types.append(item_type)
+                    if any_of_types: 
+                        primary_type_str = any_of_types[0]
+                    else: 
+                        is_nullable = True
+                        primary_type_str = "string"
                 elif prop_type_info is None and 'anyOf' not in prop_details:
-                    primary_type_str = "string"; is_nullable = True
+                    primary_type_str = "string"
+                    is_nullable = True
 
                 glm_type = self._get_glm_type_enum(primary_type_str)
                 enum_values = prop_details.get("enum")
@@ -261,7 +267,6 @@ class LLMInterface:
                 
                 # Conditional enum limiting (effectively disabled)
                 if enum_values and isinstance(enum_values, list) and len(enum_values) > max_enum_vals:
-                    # log.debug(f"Tool '{tool_name}': Reduced enum size for property '{prop_name}' from {len(enum_values)} to {max_enum_vals}") # Less likely
                     enum_values = enum_values[:max_enum_vals]
                 
                 prop_schema_args = {
@@ -273,63 +278,88 @@ class LLMInterface:
                     prop_schema_args["enum"] = enum_values
                 
                 if glm_type == glm.Type.OBJECT:
-                    # Conditional simplification of nested objects (effectively disabled)
+                    # Handle nested objects
                     if "properties" in prop_details and isinstance(prop_details["properties"], dict) and len(prop_details["properties"]) > max_nested_obj_props:
-                        # log.warning(f"Tool '{tool_name}': Simplifying complex nested object for property '{prop_name}'...") # Less likely
                         prop_schema_args["type_"] = glm.Type.STRING 
                         if "description" not in prop_schema_args or not prop_schema_args["description"]:
                              prop_schema_args["description"] = f"Complex object with {len(prop_details['properties'])} properties, simplified."
-                        prop_schema_args.pop("properties", None); prop_schema_args.pop("required", None)
+                        prop_schema_args.pop("properties", None)
+                        prop_schema_args.pop("required", None)
                     else:
-                        nested_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}", prop_details) # Pass more specific name for nested
+                        nested_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}", prop_details)
                         if nested_schema:
                             prop_schema_args["properties"] = nested_schema.properties
-                            if nested_schema.required: prop_schema_args["required"] = nested_schema.required
-                        else: prop_schema_args["properties"] = {}
+                            if nested_schema.required: 
+                                prop_schema_args["required"] = nested_schema.required
+                        else: 
+                            prop_schema_args["properties"] = {}
 
                 elif glm_type == glm.Type.ARRAY: 
                     items_details = None
-                    if "items" in prop_details: items_details = prop_details["items"]
+                    if "items" in prop_details: 
+                        items_details = prop_details["items"]
                     elif "anyOf" in prop_details and isinstance(prop_details["anyOf"], list):
                         for element in prop_details["anyOf"]:
                             if isinstance(element, dict) and element.get("type") == "array" and "items" in element:
-                                items_details = element["items"]; break 
+                                items_details = element["items"]
+                                break 
                     
+                    # CRITICAL FIX: Ensure all arrays have valid items schemas
                     if items_details and isinstance(items_details, dict):
-                        # Conditional simplification of array item objects (effectively disabled)
+                        # Handle complex array item objects
                         if items_details.get("type") == "object" and "properties" in items_details and isinstance(items_details["properties"], dict) and len(items_details["properties"]) > max_array_item_obj_props:
-                            # log.warning(f"Tool '{tool_name}': Simplifying complex array item object for property '{prop_name}'...") # Less likely
                             items_details = {"type": "string", "description": "Simplified array item (was complex object)"}
+                    elif items_details is None:
+                        # CRITICAL FIX: Provide default items schema if missing
+                        log.warning(f"Tool '{tool_name}', Property '{prop_name}': Array type missing 'items' definition. Using string default.")
+                        items_details = {"type": "string", "description": "Array item (type not specified)"}
                     
                     if items_details and isinstance(items_details, dict) and "type" in items_details:
                         items_type_str = items_details.get("type", "string")
                         items_glm_type = self._get_glm_type_enum(items_type_str)
-                        items_schema_args = {"type_": items_glm_type, "description": items_details.get("description"), "nullable": items_details.get("nullable", False)}
+                        items_schema_args = {
+                            "type_": items_glm_type, 
+                            "description": items_details.get("description"), 
+                            "nullable": items_details.get("nullable", False)
+                        }
                         items_enum_values = items_details.get("enum")
-                        if items_enum_values is not None: items_schema_args["enum"] = items_enum_values
+                        if items_enum_values is not None: 
+                            items_schema_args["enum"] = items_enum_values
 
                         if items_glm_type == glm.Type.OBJECT:
-                             nested_item_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}[items]", items_details) # Pass specific name for nested items
+                             nested_item_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}[items]", items_details)
                              if nested_item_schema:
                                  items_schema_args["properties"] = nested_item_schema.properties
-                                 if nested_item_schema.required: items_schema_args["required"] = nested_item_schema.required
-                             else: items_schema_args["properties"] = {}
+                                 if nested_item_schema.required: 
+                                     items_schema_args["required"] = nested_item_schema.required
+                             else: 
+                                 items_schema_args["properties"] = {}
                         
                         items_schema_args = {k: v for k, v in items_schema_args.items() if v is not None}
                         try:
                             prop_schema_args["items"] = glm.Schema(**items_schema_args)
                         except Exception as item_schema_ex:
-                             log.warning(f"Tool '{tool_name}', Property '{prop_name}': Failed to create glm.Schema for items. Details: {item_schema_ex}. API call may fail.", exc_info=True)
-                             prop_schema_args.pop("items", None)
+                             log.warning(f"Tool '{tool_name}', Property '{prop_name}': Failed to create glm.Schema for items. Details: {item_schema_ex}. Using string fallback.", exc_info=True)
+                             # CRITICAL FIX: Provide fallback items schema
+                             prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
                     else:
-                        log.warning(f"Tool '{tool_name}', Property '{prop_name}': Could not find valid 'items' definition for array type. Skipping items. API call will likely fail.")
-                        prop_schema_args.pop("items", None)
+                        log.warning(f"Tool '{tool_name}', Property '{prop_name}': Could not create valid 'items' definition for array type. Using string fallback.")
+                        # CRITICAL FIX: Always provide a fallback items schema for arrays
+                        prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
 
                 prop_schema_args = {k: v for k, v in prop_schema_args.items() if v is not None}
-                schema_props[prop_name] = glm.Schema(**prop_schema_args)
+                try:
+                    schema_props[prop_name] = glm.Schema(**prop_schema_args)
+                except Exception as prop_schema_ex:
+                    log.error(f"Tool '{tool_name}', Property '{prop_name}': Failed to create property schema: {prop_schema_ex}. Skipping property.", exc_info=True)
+                    continue
 
             final_schema_args = {"type_": glm.Type.OBJECT, "properties": schema_props}
-            if required_params: final_schema_args["required"] = required_params
+            if required_params: 
+                # Filter required params to only include properties that were actually added
+                valid_required = [req for req in required_params if req in schema_props]
+                if valid_required:
+                    final_schema_args["required"] = valid_required
                 
             return glm.Schema(**final_schema_args)
 

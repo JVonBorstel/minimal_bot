@@ -7,7 +7,7 @@ import logging
 import json
 import sys
 from typing import (
-    Optional, Dict, Any, List, Callable, Union, get_origin, get_args, Literal
+    Optional, Dict, Any, List, Callable, Union, get_origin, get_args, Literal, Tuple
 )
 from pydantic import BaseModel, Field, model_validator
 # Union, Literal are imported from typing on line 9. ForwardRef was unused.
@@ -105,34 +105,52 @@ def _resolve_ref_in_schema(schema: Dict[str, Any], defs: Dict[str, Any]) -> Dict
 def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
     """
     Maps Python types to a JSON schema dictionary.
-    Handles basic types, Optional, Union, Literal, List, and Dict.
+    Handles basic types, Optional, Union, Literal, List, Dict, and Tuple.
 
     Args:
         py_type: The Python type to map
 
     Returns:
         A dictionary representing the JSON schema for the type,
-        or None if the type should be excluded (e.g., Config).
-
-        Note: Advanced JSON schema keywords such as 'oneOf', 'allOf',
-              and 'format' are not currently supported by this function.
+        or None if the type should be excluded (e.g., Config, AppState).
     """
+    # CRITICAL FIX: Exclude AppState and other complex state objects from tool schemas
     if py_type is Config:
         log.debug(f"Identified Config type {py_type}, excluding from schema.")
+        return None
+        
+    # Check if it's an AppState type (handle both direct import and string comparison)
+    type_name = getattr(py_type, '__name__', str(py_type))
+    if 'AppState' in type_name or 'Message' in type_name or 'UserProfile' in type_name:
+        log.debug(f"Identified complex state type {py_type}, excluding from schema.")
         return None
 
     origin = get_origin(py_type)
     args = get_args(py_type)
 
+    # CRITICAL FIX: Handle Tuple types properly
+    if origin is tuple or origin is Tuple:
+        # Convert Tuple[str, str, str, str] to array with string items
+        if args:
+            # For homogeneous tuples, use the first type
+            first_type_schema = _map_py_type_to_json_schema(args[0])
+            if first_type_schema:
+                return {
+                    "type": "array",
+                    "items": first_type_schema,
+                    "minItems": len(args),
+                    "maxItems": len(args),
+                    "description": f"Tuple with {len(args)} elements"
+                }
+        return {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tuple (converted to array)"
+        }
+
     if origin is Literal:
         # Literal['a', 'b'] -> {"type": "string", "enum": ["a", "b"]}
-        # Assumes all literal values are of the same basic type
-        # (usually string)
         if args:
-            # Determine the type of the literal values (e.g., string, integer)
-            # For simplicity, assumes first arg's type is representative
-            # if mixed. More robustly, one might check all args are same type
-            # or handle mixed types.
             first_arg_type = type(args[0])
             json_type = "string"  # Default for literals
             if first_arg_type is int:
@@ -142,22 +160,12 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
             elif first_arg_type is float:
                 json_type = "number"
 
-            # Ensure all enum values are of the determined type for schema
-            # validity, or convert them if safe (e.g. int to str if
-            # json_type is string). For now, we pass them as is, relying on
-            # correct Literal usage.
             return {"type": json_type, "enum": list(args)}
-        else:  # Should not happen for a valid Literal
-            log.warning(
-                f"Literal type '{py_type}' has no arguments. "
-                "Mapping to string."
-            )
+        else:
+            log.warning(f"Literal type '{py_type}' has no arguments. Mapping to string.")
             return {"type": "string"}
 
     if origin is Union:
-        # Union[T1, T2, None] ->
-        # {"anyOf": [schema_for_T1, schema_for_T2, {"type": "null"}]}
-        # Optional[T] is Union[T, NoneType]
         non_none_args = [arg for arg in args if arg is not type(None)]
 
         if not non_none_args:  # Union[NoneType]
@@ -167,7 +175,7 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
         if len(args) > len(non_none_args):  # Means NoneType was present
             if len(non_none_args) == 1:  # Optional[T]
                 inner_type = non_none_args[0]
-                # R1.1: Handle simple Optional primitive types directly
+                # Handle simple Optional primitive types directly
                 if inner_type is str:
                     return {"type": "string", "nullable": True}
                 elif inner_type is int:
@@ -178,35 +186,28 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
                     return {"type": "boolean", "nullable": True}
                 else:
                     # Fallback to existing logic for Optional[ComplexType]
-                    # or other non-primitives
                     type_schema = _map_py_type_to_json_schema(inner_type)
                     if type_schema:
                         return {"anyOf": [type_schema, {"type": "null"}]}
                     else:  # Inner type was excluded (e.g. Config)
-                        # Or None if Optional[Config] should be excluded.
                         return {"type": "null"}
             else:  # Optional[Union[A,B,...]]
-                sub_schemas = [_map_py_type_to_json_schema(arg)
-                               for arg in non_none_args]
+                sub_schemas = [_map_py_type_to_json_schema(arg) for arg in non_none_args]
                 valid_sub_schemas = [s for s in sub_schemas if s]
                 if valid_sub_schemas:
                     return {"anyOf": valid_sub_schemas + [{"type": "null"}]}
                 else:
                     return {"type": "null"}
         else:  # Plain Union[A, B, ...] (no NoneType)
-            sub_schemas = [_map_py_type_to_json_schema(arg)
-                           for arg in non_none_args]
+            sub_schemas = [_map_py_type_to_json_schema(arg) for arg in non_none_args]
             valid_sub_schemas = [s for s in sub_schemas if s]
-            if len(valid_sub_schemas) == 1:  # Union[A] or ExcludedType
+            if len(valid_sub_schemas) == 1:
                 return valid_sub_schemas[0]
             elif valid_sub_schemas:
                 return {"anyOf": valid_sub_schemas}
-            else:  # Union of only excluded types
-                log.warning(
-                    f"Union type '{py_type}' consists only of excluded "
-                    "types. Mapping to null."
-                )
-                return {"type": "null"}  # Or consider not returning a schema
+            else:
+                log.warning(f"Union type '{py_type}' consists only of excluded types. Mapping to null.")
+                return {"type": "null"}
             
     elif origin in (list, List):
         item_schema = {"type": "string"}  # Default item type
@@ -216,16 +217,12 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
                 item_schema = item_type_schema
         return {"type": "array", "items": item_schema}
     elif origin in (dict, Dict):
-        # For Dict[K, V], OpenAPI doesn't directly support typed keys
-        # other than string. It uses additionalProperties for the value type.
         additional_properties_schema: Union[bool, Dict[str, Any]] = True
-        # Allows any type for values by default
         if args and len(args) == 2:
             value_type_schema = _map_py_type_to_json_schema(args[1])
             if value_type_schema:
                 additional_properties_schema = value_type_schema
-        return {"type": "object",
-                "additionalProperties": additional_properties_schema}
+        return {"type": "object", "additionalProperties": additional_properties_schema}
     elif py_type is str:
         return {"type": "string"}
     elif py_type is int:
@@ -235,25 +232,20 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
     elif py_type is bool:
         return {"type": "boolean"}
     elif py_type is Any or py_type is inspect.Parameter.empty:
-        # Treat Any or unspecified type as string for simplicity,
-        # or allow any type. For stricter schemas, one might raise an error
-        # or use a specific "any type" schema if supported.
-        return {"type": "string"}  # Or {} to allow any type.
+        return {"type": "string"}
     elif py_type is type(None):
         return {"type": "null"}
 
-    # Fallback for Pydantic models or other complex types not handled above
-    if hasattr(py_type, 'model_json_schema') and \
-       callable(py_type.model_json_schema):
+    # CRITICAL FIX: Enhanced handling for Pydantic models with better validation
+    if hasattr(py_type, 'model_json_schema') and callable(py_type.model_json_schema):
         try:
-            # Use Pydantic's own schema generation if available
-            # (for Pydantic models). This will correctly handle nested
-            # Literals, Unions, etc., within the model.
-            log.debug(
-                f"Using Pydantic's model_json_schema() for type "
-                f"'{py_type.__name__}'."
-            )
-            # Get the full schema document from Pydantic
+            # Check if this is a complex state object that should be excluded
+            type_name = getattr(py_type, '__name__', str(py_type))
+            if any(excluded in type_name for excluded in ['AppState', 'Message', 'UserProfile', 'Config']):
+                log.debug(f"Excluding complex Pydantic model '{type_name}' from schema.")
+                return None
+                
+            log.debug(f"Using Pydantic's model_json_schema() for type '{py_type.__name__}'.")
             full_schema = py_type.model_json_schema()
             
             # Extract the main schema and definitions
@@ -263,29 +255,16 @@ def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
             # Resolve all $ref references using the definitions
             if defs:
                 resolved_schema = _resolve_ref_in_schema(main_schema, defs)
-                log.debug(
-                    f"Resolved {len(defs)} $ref definitions for type '{py_type.__name__}'"
-                )
+                log.debug(f"Resolved {len(defs)} $ref definitions for type '{py_type.__name__}'")
                 return resolved_schema
             else:
-                # No $defs to resolve, return the main schema
                 return main_schema
 
         except Exception as e:
-            log.warning(
-                f"Failed to get JSON schema from Pydantic model "
-                f"'{py_type.__name__}': {e}. Falling back to object.",
-                exc_info=False
-            )
-            return {
-                "type": "object",
-                "description": f"Complex object: {py_type.__name__}"
-            }
+            log.warning(f"Failed to get JSON schema from Pydantic model '{py_type.__name__}': {e}. Falling back to object.", exc_info=False)
+            return {"type": "object", "description": f"Complex object: {py_type.__name__}"}
 
-    log.warning(
-        f"Unsupported type hint '{py_type}' for JSON schema generation. "
-        "Falling back to string."
-    )
+    log.warning(f"Unsupported type hint '{py_type}' for JSON schema generation. Falling back to string.")
     return {"type": "string"}
 
 

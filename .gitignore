@@ -9,6 +9,18 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+build/
+dist/
+*.egg-info/
+wheels/
+pip-wheel-metadata/
+develop-eggs/
+eggs/
+sdist/
+parts/
+var/
+*.manifest
+*.spec
 
 # Database files
 *.sqlite
@@ -21,8 +33,14 @@ __pycache__/
 logs/
 startup_log.txt
 bot_integration.log
+test_database_backend_switching.log
+test_database_persistence.log
+test_database_resilience.log
+test_database_transactions.log
+test_memory_management.log
+test_results.log
 
-# Testing
+# Testing - Exclude all test files, directories, and artifacts
 .pytest_cache/
 .coverage
 htmlcov/
@@ -31,35 +49,48 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
-.pytest_cache/
-
-# Test files (exclude from production)
-test*.py
-*test*.py
 tests/
+test_*.py
 *_test.py
+*test.py
+tests_*.py
 debug*.py
 *debug*.py
 automated_bot_tester.py
 ultimate_bot_tester.py
 simple_bot_test.py
-test_*.py
-validate_*.py
-check_*.py
-monitor_*.py
-promote_admin.py
-setup_admin.py
-show_my_jira_tickets.py
-integrate_bot_improvements.py
-fix_jira_config.py
+test_complete_onboarding_flow.py
+test_direct_jira_api.py
+test_jira_story_builder.py
+test_memory_management.log
+test_new_jira_token.py
+test_results.log
+test_story_builder.py
+test_tool_reliability_fixed.py
+test_tool_reliability.py
+test_ultimate_onboarding_stress.py
+test_workflow_fixes.py
+validate_comprehensive_fix.py # Assuming this is for testing/validation
+check_db.py # Assuming this is a test/check script
+check_dependencies.py # Assuming this is a test/check script
 
-# Development tools and scripts
+# Development tools and scripts (evaluate if any are needed in production)
+# Comment out if needed for specific operational tasks, otherwise ignore for cleaner repo
 dump_codebase.py
 llm_codebase_export.py
 codebase_dump.txt
 help_output_sample.txt
+explore_jira_tickets.py
+# get_jira_comments.py # Now tracking this useful utility
+fix_jira_config.py
+integrate_bot_improvements.py
+promote_admin.py
+setup_admin.py
+show_my_jira_tickets.py
+monitor_bot_health.py # If this is for local dev monitoring only
+requirements-minimal.txt # If not the primary requirements file
 
-# Documentation and reports (not needed at runtime)
+# Documentation and reports (not needed at runtime, keep essential docs)
 *_REPORT.md
 *_SUMMARY.md
 COMPREHENSIVE_FIX_SUMMARY.md
@@ -67,37 +98,28 @@ FINAL_COMPREHENSIVE_FIX_REPORT.md
 TOOL_RELIABILITY_INVESTIGATION_REPORT.md
 TEST_ORGANIZATION_SUMMARY.md
 LLM_CODEBASE_EXPORT.md
-README.md
-QUICK_START.md
-EASY_HOSTING.md
-DEPLOYMENT_GUIDE.md
+# README.md # Keep
+# QUICK_START.md # Keep if useful for users
+# EASY_HOSTING.md # Keep if useful for users
+# DEPLOYMENT_GUIDE.md # Keep if useful for users
+# jira_scopes_guide.md # Keep if useful documentation
 
-# Bot files (these look like test bots)
+# Bot files (these look like test bots or examples)
 *.bot
 Aughie.bot
 Augie-Tester.bot
 asdgasdgasgas.bot
 
-# Data and cache directories (rebuild in production)
-data/
-tool_embeddings.json
+# Data and cache directories (rebuild in production or manage via deployment)
+# data/ # If data/ contains essential static assets, don't ignore. If it's all transient, then ignore.
+# tool_embeddings.json # If this is generated and large, consider ignoring
 embeddings_cache/
-cache/
-
-# Multiple requirements files (keep only one)
-requirements-minimal.txt
-# Keep only requirements.txt
+# cache/ # This is already covered by .pytest_cache/v/cache if it's pytest related.
 
 # Development configuration
-.env.example
-.cursorrules
-pytest.ini
-.pytest_cache/
-
-# Railway and Docker are NEEDED for deployment
-# alembic/ - NEEDED for database migrations  
-# railway.toml - NEEDED for Railway config
-# Dockerfile - NEEDED for Railway builds
+.env.example # Good to keep as a template
+.cursorrules # Specific to Cursor, usually local dev
+# pytest.ini # Test configuration, will be ignored if tests/ is ignored but can be kept if tests are run in CI from a different checkout strategy
 
 # IDE and editor files
 .vscode/
@@ -105,10 +127,18 @@ pytest.ini
 *.swp
 *.swo
 *~
+nbproject/
+*.sublime-project
+*.sublime-workspace
+project.vim
+Session.vim
+*.tmproj
 
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
 # Temporary files
 *.tmp
@@ -116,15 +146,10 @@ Thumbs.db
 backup/
 *.bak
 
-# Git files
-.git/
-.gitattributes
+# Deployment scripts (keep if part of repo-based deployment)
+# deploy.ps1
+# deploy.sh
 
-# Deployment scripts (if you want to keep them local)
-deploy.ps1
-deploy.sh
-
-# Health check and utility scripts
-health_checks.py
-run_migrations.py
-explore_jira_tickets.py 
+# Health check and utility scripts (Keep if operational, ignore if dev-only)
+# health_checks.py # If used by deployed app, keep
+# run_migrations.py # Usually needed for deployment/operations, keep 

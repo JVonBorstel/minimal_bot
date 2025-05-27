@@ -61,9 +61,11 @@ class FunctionResponsePart(BaseModel):
 MessagePart = Union[TextPart, FunctionCallPart, FunctionResponsePart]
 
 class Message(BaseModel):
-    """Enhanced Message model with safe validation"""
+    """Enhanced Message model with safe validation and backward compatibility"""
     model_config = ConfigDict(extra='forbid', validate_assignment=True)
     
+    # CRITICAL FIX: Add missing id attribute expected by history processing
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique message identifier")
     role: str = Field(description="Role of the message sender")
     parts: List[MessagePart] = Field(default_factory=list, description="Message content parts")
     raw_text: Optional[str] = Field(default=None, description="Original raw text")
@@ -76,6 +78,33 @@ class Message(BaseModel):
     message_type: Optional[str] = Field(default=None, description="Type of message for workflow context")
     tool_calls: Optional[List[Dict[str, Any]]] = Field(default=None, description="Tool calls if this is a model message with tools")
     tool_call_id: Optional[str] = Field(default=None, description="Tool call ID if this is a tool response")
+    
+    # CRITICAL FIX: Add backward compatibility methods expected by legacy code
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-like access for backward compatibility"""
+        try:
+            return getattr(self, key, default)
+        except AttributeError:
+            return default
+    
+    def __getitem__(self, key: str) -> Any:
+        """Dict-like access for backward compatibility"""
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(f"Message has no attribute '{key}'")
+    
+    def __contains__(self, key: str) -> bool:
+        """Dict-like membership test for backward compatibility"""
+        return hasattr(self, key)
+    
+    def keys(self) -> List[str]:
+        """Dict-like keys access for backward compatibility"""
+        return list(self.model_fields.keys())
+    
+    def items(self):
+        """Dict-like items access for backward compatibility"""
+        return [(k, getattr(self, k)) for k in self.model_fields.keys()]
     
     @model_validator(mode='before')
     @classmethod

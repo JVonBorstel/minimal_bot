@@ -7,6 +7,7 @@ import functools
 from jira import JIRA, JIRAError
 from jira.exceptions import JIRAError as LibraryJIRAError
 from requests.exceptions import RequestException
+import requests
 
 from config import Config
 from . import tool
@@ -20,7 +21,7 @@ logging.getLogger('jira').setLevel(logging.INFO)
 class JiraTools:
     """
     Provides tools for interacting with the Jira API using the python-jira library.
-    This version is stripped down to essential functionality: getting issues by user and health check.
+    Now supports both OAuth 2.0 (for scoped tokens) and Basic Auth (for unscoped tokens).
     Supports both shared credentials (from config) and personal user credentials.
     """
     jira_client: Optional[JIRA] = None
@@ -44,17 +45,48 @@ class JiraTools:
             self.jira_client = None
             return
 
+        # Try to create client with automatic auth method detection
+        self.jira_client = self._create_jira_client(self.jira_email, self.jira_token)
+
+    def _is_scoped_token(self, token: str) -> bool:
+        """
+        Detect if a token is scoped or unscoped.
+        Scoped tokens typically start with 'ATATT3xFf' and are longer.
+        Both types use basic authentication - scopes are enforced server-side.
+        """
+        if not token:
+            return False
+        
+        # Scoped tokens are typically longer and have a specific format
+        return len(token) > 100 and token.startswith('ATATT3xFf')
+
+    def _create_jira_client(self, email: str, token: str) -> Optional[JIRA]:
+        """
+        Create a Jira client using the appropriate authentication method.
+        Both scoped and unscoped tokens use basic authentication - the difference is 
+        that scopes are enforced server-side by Atlassian Cloud.
+        """
         try:
-            log.info(f"Attempting to connect to Jira at {self.jira_url} with user {self.jira_email}")
+            log.info(f"Attempting to connect to Jira at {self.jira_url} with user {email}")
             options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
-            self.jira_client = JIRA(
+            
+            token_type = "scoped" if self._is_scoped_token(token) else "unscoped"
+            log.info(f"Detected {token_type} API token - using Basic authentication (scopes enforced server-side)")
+            
+            # Both scoped and unscoped tokens use basic auth
+            # The difference is that scoped tokens have permissions enforced by Atlassian Cloud
+            jira_client = JIRA(
                 options=options,
-                basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
+                basic_auth=(email, token),
                 timeout=self.config.settings.default_api_timeout_seconds,
                 max_retries=self.config.settings.default_api_max_retries
             )
-            server_info = self.jira_client.server_info()
-            log.info(f"Jira client initialized successfully. Connected to: {server_info.get('baseUrl', self.jira_url)}")
+            
+            # Test the connection
+            server_info = jira_client.server_info()
+            log.info(f"Jira client initialized successfully using Basic Auth with {token_type} token. Connected to: {server_info.get('baseUrl', self.jira_url)}")
+            return jira_client
+            
         except LibraryJIRAError as e:
             rate_limit_headers = {}
             if hasattr(e, 'response') and e.response is not None and hasattr(e.response, 'headers'):
@@ -66,14 +98,24 @@ class JiraTools:
                 rate_limit_headers = {k: v for k, v in rate_limit_headers.items() if v is not None}
                 if rate_limit_headers:
                     log.warning(f"Jira client initialization error (status: {e.status_code}). Rate limit headers: {rate_limit_headers}")
-            log.error(f"Failed to initialize Jira client (JIRAError): Status={e.status_code}, Text={e.text}", exc_info=True)
-            self.jira_client = None
+            
+            # Provide better error messages for scoped token issues
+            if self._is_scoped_token(token):
+                if e.status_code == 401:
+                    log.error(f"Authentication failed with scoped token. Check if token has required scopes: Status={e.status_code}, Text={e.text}")
+                elif e.status_code == 403:
+                    log.error(f"Access forbidden with scoped token. Missing required permissions/scopes: Status={e.status_code}, Text={e.text}")
+                else:
+                    log.error(f"Scoped token error: Status={e.status_code}, Text={e.text}")
+            else:
+                log.error(f"Failed to initialize Jira client (JIRAError): Status={e.status_code}, Text={e.text}", exc_info=True)
+            return None
         except RequestException as e:
             log.error(f"Failed to initialize Jira client (Network Error): {e}", exc_info=True)
-            self.jira_client = None
+            return None
         except Exception as e:
             log.error(f"Failed to initialize Jira client (Unexpected Error): {e}", exc_info=True)
-            self.jira_client = None
+            return None
 
     def _get_personal_credentials(self, app_state: AppState) -> Optional[tuple[str, str]]:
         """
@@ -105,6 +147,7 @@ class JiraTools:
     def _create_personal_client(self, email: str, token: str) -> Optional[JIRA]:
         """
         Create a temporary Jira client for personal credentials.
+        Now supports both OAuth 2.0 and Basic Auth based on token type.
         
         Args:
             email: Personal Jira email
@@ -121,32 +164,20 @@ class JiraTools:
             log.debug("Using cached personal Jira client")
             return self._personal_clients_cache[cache_key]
         
-        try:
-            if not self.jira_url:
-                log.warning("Cannot create personal Jira client: Jira URL not configured")
-                return None
-            
-            timeout_seconds = getattr(self.config, 'DEFAULT_API_TIMEOUT_SECONDS', 10)
-            options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
-            
-            personal_client = JIRA(
-                options=options,
-                basic_auth=(email, token),
-                timeout=timeout_seconds,
-                max_retries=self.config.settings.default_api_max_retries
-            )
-            
-            # Test the client
-            server_info = personal_client.server_info()
+        if not self.jira_url:
+            log.warning("Cannot create personal Jira client: Jira URL not configured")
+            return None
+        
+        log.debug(f"Creating personal Jira client for {email}")
+        personal_client = self._create_jira_client(email, token)
+        
+        if personal_client:
             log.info(f"Personal Jira client created successfully for user: {email}")
-            
             # Cache it for future use in this session
             self._personal_clients_cache[cache_key] = personal_client
-            
             return personal_client
-            
-        except Exception as e:
-            log.warning(f"Failed to create personal Jira client for {email}: {e}")
+        else:
+            log.warning(f"Failed to create personal Jira client for {email}")
             return None
 
     def _get_jira_client(self, app_state: AppState) -> Optional[JIRA]:
@@ -229,9 +260,9 @@ class JiraTools:
                   },
                   "status_category": {
                       "type": "string",
-                      "description": "Filter issues by status category.",
-                      "enum": ["to do", "in progress", "done"],
-                      "default": "to do"
+                      "description": "Filter issues by status category. Leave empty to search all statuses.",
+                      "enum": ["to do", "in progress", "done", "all"],
+                      "default": "all"
                   },
                   "max_results": {
                       "type": "integer",
@@ -243,7 +274,7 @@ class JiraTools:
           }
     )
     @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
-    async def get_issues_by_user(self, app_state: AppState, user_email: Optional[str] = None, status_category: Optional[Literal["to do", "in progress", "done"]] = "to do", max_results: int = 15) -> List[Dict[str, Any]]:
+    async def get_issues_by_user(self, app_state: AppState, user_email: Optional[str] = None, status_category: Optional[Literal["to do", "in progress", "done", "all"]] = "all", max_results: int = 15) -> List[Dict[str, Any]]:
         """
         Finds issues assigned to a user by their email address, optionally filtered by status category.
         Now supports personal Jira credentials for enhanced access.
@@ -252,7 +283,7 @@ class JiraTools:
         Args:
             app_state: Application state containing user profile (injected by tool framework)
             user_email: Optional. The email address of the user. Defaults to current user's email.
-            status_category: Optional. Filter by status category: 'to do', 'in progress', 'done'. Defaults to 'to do'.
+            status_category: Optional. Filter by status category: 'to do', 'in progress', 'done', 'all'. Defaults to 'all'.
             max_results: Optional. Maximum number of issues to return. Defaults to 15.
 
         Returns:
@@ -274,7 +305,7 @@ class JiraTools:
 
         try:
             jql_parts = [f"assignee = \"{effective_user_email}\" OR assignee = currentUser() AND reporter = \"{effective_user_email}\""]
-            if status_category:
+            if status_category and status_category.lower() != "all":
                 status_map = {
                     "to do": "To Do",
                     "in progress": "In Progress",
@@ -368,22 +399,11 @@ class JiraTools:
                 return {"status": "NOT_CONFIGURED", "message": "Jira API URL, Email, or Token not configured."}
 
             if not self.jira_client:
-                try:
-                    log.info(f"(Health Check) Attempting to connect to Jira at {self.jira_url}")
-                    options = {'server': self.jira_url, 'verify': True, 'rest_api_version': 'latest'}
-                    self.jira_client = JIRA(
-                        options=options,
-                        basic_auth=(self.jira_email, self.jira_token), # type: ignore[arg-type]
-                        timeout=5, 
-                        max_retries=self.config.settings.default_api_max_retries
-                    )
-                except (LibraryJIRAError, RequestException, Exception) as e:
-                    log.error(f"(Health Check) Jira client re-initialization failed: {e}")
-                    self.jira_client = None
-                    return {"status": "ERROR", "message": f"Jira client initialization failed during health check: {str(e)}"}
-            
-            if not self.jira_client:
-                 return {"status": "ERROR", "message": "Jira client could not be initialized. Previous errors persist."}
+                log.info(f"(Health Check) Attempting to connect to Jira at {self.jira_url}")
+                self.jira_client = self._create_jira_client(self.jira_email, self.jira_token)
+                
+                if not self.jira_client:
+                    return {"status": "ERROR", "message": "Jira client initialization failed during health check"}
             
             jira_client_to_test = self.jira_client
             credential_type = "shared"
@@ -415,3 +435,318 @@ class JiraTools:
         except Exception as e:
             log.error(f"Jira health check failed{' ('+credential_type+' credentials)' if credential_type else ''}: Unexpected error - {e}", exc_info=True)
             return {"status": "ERROR", "message": f"Unexpected error during Jira health check: {str(e)}"}
+
+    def _create_issue_sync(self, app_state: AppState, issue_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronous helper method to create Jira issues."""
+        jira_client = self._check_jira_client(app_state)
+        
+        try:
+            new_issue = jira_client.create_issue(fields=issue_dict)
+            
+            # Return comprehensive issue info
+            return {
+                "key": new_issue.key,
+                "id": new_issue.id,
+                "url": new_issue.permalink(),
+                "summary": issue_dict.get("summary", ""),
+                "project_key": issue_dict.get("project", {}).get("key", ""),
+                "issue_type": issue_dict.get("issuetype", {}).get("name", ""),
+                "status": "To Do",  # Default status for new issues
+                "created": True
+            }
+        except Exception as e:
+            log.error(f"Failed to create Jira issue: {e}")
+            raise
+
+    @tool(name="jira_create_story",
+          description="Creates a new Jira story/issue with intelligent defaults and template support. Can extract details from natural language descriptions.",
+          parameters_schema={
+              "type": "object",
+              "properties": {
+                  "summary": {
+                      "type": "string",
+                      "description": "The story title/summary. Should be concise and descriptive."
+                  },
+                  "description": {
+                      "type": "string", 
+                      "description": "Detailed description of the story. Can include acceptance criteria, background, etc."
+                  },
+                  "project_key": {
+                      "type": "string",
+                      "description": "The Jira project key (e.g., 'PROJ', 'DEV'). If not provided, uses default from config."
+                  },
+                  "issue_type": {
+                      "type": "string",
+                      "description": "Type of issue to create.",
+                      "enum": ["Story", "Task", "Bug", "Epic"],
+                      "default": "Story"
+                  },
+                  "priority": {
+                      "type": "string",
+                      "description": "Priority level for the story.",
+                      "enum": ["Highest", "High", "Medium", "Low", "Lowest"],
+                      "default": "Medium"
+                  },
+                  "assignee_email": {
+                      "type": "string",
+                      "description": "Email of the person to assign this story to. Leave empty for unassigned."
+                  },
+                  "labels": {
+                      "type": "array",
+                      "items": {"type": "string"},
+                      "description": "Labels/tags to apply to the story (e.g., ['frontend', 'api', 'urgent'])"
+                  },
+                  "story_points": {
+                      "type": "integer",
+                      "description": "Story points estimation (typically 1, 2, 3, 5, 8, 13, 21)",
+                      "minimum": 1,
+                      "maximum": 100
+                  },
+                  "template": {
+                      "type": "string", 
+                      "description": "Use a predefined template for the story.",
+                      "enum": ["user_story", "bug_fix", "tech_debt", "research", "custom"],
+                      "default": "custom"
+                  }
+              },
+              "required": ["summary"]
+          }
+    )
+    @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
+    async def create_story(
+        self, 
+        app_state: AppState, 
+        summary: str,
+        description: Optional[str] = None,
+        project_key: Optional[str] = None,
+        issue_type: str = "Story",
+        priority: str = "Medium", 
+        assignee_email: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        story_points: Optional[int] = None,
+        template: str = "custom"
+    ) -> Dict[str, Any]:
+        """
+        Creates a new Jira story with intelligent defaults and template support.
+        
+        Args:
+            app_state: Application state containing user profile
+            summary: The story title/summary
+            description: Detailed description of the story
+            project_key: Jira project key (uses default if not provided)
+            issue_type: Type of issue (Story, Task, Bug, Epic)
+            priority: Priority level
+            assignee_email: Email of assignee (optional)
+            labels: List of labels to apply
+            story_points: Story points estimation
+            template: Template to use for story structure
+            
+        Returns:
+            Dictionary with created story details including key, URL, etc.
+        """
+        log.info(f"Creating Jira {issue_type}: '{summary}' with template '{template}'")
+        
+        # Use default project if not provided
+        effective_project_key = project_key or self.config.get_env_value('JIRA_DEFAULT_PROJECT_KEY')
+        if not effective_project_key:
+            raise ValueError("No project key provided and no default project configured. Please specify project_key.")
+        
+        # Apply template-based enhancements
+        enhanced_description = self._apply_story_template(template, summary, description or "")
+        
+        # Build the issue dictionary
+        issue_dict = {
+            "project": {"key": effective_project_key},
+            "summary": summary,
+            "description": enhanced_description,
+            "issuetype": {"name": issue_type},
+            "priority": {"name": priority}
+        }
+        
+        # Add optional fields
+        if assignee_email:
+            # Try to find user by email
+            try:
+                jira_client = self._check_jira_client(app_state)
+                # Search for user by email
+                users = jira_client.search_assignable_users_for_projects(assignee_email, [effective_project_key])
+                if users:
+                    issue_dict["assignee"] = {"accountId": users[0].accountId}
+                    log.info(f"Assigned story to user: {assignee_email}")
+                else:
+                    log.warning(f"Could not find Jira user with email: {assignee_email}")
+            except Exception as e:
+                log.warning(f"Failed to set assignee {assignee_email}: {e}")
+        
+        if labels:
+            issue_dict["labels"] = labels
+            
+        # Add story points if supported (custom field varies by Jira instance)
+        if story_points:
+            # Common story points field names
+            story_point_fields = ["customfield_10016", "customfield_10004", "customfield_10002"]
+            for field in story_point_fields:
+                try:
+                    jira_client = self._check_jira_client(app_state)
+                    # Try to get field info to see if it exists
+                    fields = jira_client.fields()
+                    field_exists = any(f["id"] == field for f in fields)
+                    if field_exists:
+                        issue_dict[field] = story_points
+                        log.info(f"Added story points ({story_points}) using field {field}")
+                        break
+                except Exception as e:
+                    log.debug(f"Could not set story points field {field}: {e}")
+                    continue
+        
+        try:
+            # Create the issue
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._create_issue_sync,
+                app_state,
+                issue_dict
+            )
+            
+            log.info(f"Successfully created {issue_type} {result['key']}: {summary}")
+            
+            # Enhance result with additional context
+            result.update({
+                "template_used": template,
+                "project_key": effective_project_key,
+                "priority": priority,
+                "labels": labels or [],
+                "story_points": story_points,
+                "assignee_email": assignee_email
+            })
+            
+            return result
+            
+        except JIRAError as e:
+            error_text = getattr(e, 'text', str(e))
+            log.error(f"Jira API error creating {issue_type}: Status={e.status_code}, Text={error_text}")
+            raise RuntimeError(f"Failed to create {issue_type}: {error_text}")
+        except Exception as e:
+            log.error(f"Unexpected error creating {issue_type}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error creating {issue_type}: {e}")
+
+    def _apply_story_template(self, template: str, summary: str, description: str) -> str:
+        """Apply predefined templates to enhance story descriptions."""
+        
+        if template == "user_story":
+            # User story template with acceptance criteria
+            base_template = f"""
+**User Story:**
+{description if description else "As a user, I want to [action] so that [benefit]."}
+
+**Acceptance Criteria:**
+- [ ] Criterion 1
+- [ ] Criterion 2 
+- [ ] Criterion 3
+
+**Definition of Done:**
+- [ ] Code is written and tested
+- [ ] Code review completed
+- [ ] Documentation updated
+- [ ] Deployed to staging environment
+"""
+
+        elif template == "bug_fix":
+            # Bug fix template
+            base_template = f"""
+**Bug Description:**
+{description if description else "Describe the bug and its impact."}
+
+**Steps to Reproduce:**
+1. Step 1
+2. Step 2
+3. Step 3
+
+**Expected Behavior:**
+What should happen instead.
+
+**Actual Behavior:**
+What actually happens.
+
+**Environment:**
+- Browser/Device:
+- Version:
+- Additional context:
+
+**Fix Verification:**
+- [ ] Bug is reproduced
+- [ ] Fix is implemented
+- [ ] Fix is tested
+- [ ] No regression introduced
+"""
+
+        elif template == "tech_debt":
+            # Technical debt template
+            base_template = f"""
+**Technical Debt Description:**
+{description if description else "Describe the technical issue and why it needs to be addressed."}
+
+**Current Impact:**
+- Performance impact
+- Maintainability issues
+- Security concerns
+
+**Proposed Solution:**
+Describe the approach to resolve this technical debt.
+
+**Benefits:**
+- Improved performance
+- Better code maintainability
+- Reduced future development time
+
+**Acceptance Criteria:**
+- [ ] Technical issue resolved
+- [ ] Code quality improved
+- [ ] No functionality broken
+- [ ] Documentation updated
+"""
+
+        elif template == "research":
+            # Research/spike template
+            base_template = f"""
+**Research Objective:**
+{description if description else "What needs to be investigated or researched."}
+
+**Questions to Answer:**
+- Question 1
+- Question 2
+- Question 3
+
+**Research Tasks:**
+- [ ] Task 1
+- [ ] Task 2
+- [ ] Task 3
+
+**Success Criteria:**
+- [ ] Research questions answered
+- [ ] Findings documented
+- [ ] Recommendations provided
+- [ ] Next steps identified
+
+**Time Box:**
+[Specify time limit for research]
+"""
+
+        else:  # custom or any other template
+            # Simple custom template
+            base_template = f"""
+**Description:**
+{description if description else summary}
+
+**Tasks:**
+- [ ] Task 1
+- [ ] Task 2
+- [ ] Task 3
+
+**Acceptance Criteria:**
+- [ ] Criterion 1
+- [ ] Criterion 2
+"""
+
+        return base_template.strip()
