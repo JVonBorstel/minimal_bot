@@ -317,8 +317,8 @@ if __name__ == "__main__":
         else:
             logger.warning(f"APP_SETTINGS.port not found or invalid ('{APP_SETTINGS.settings.port}'). Using default port {port_to_use}.")
         
-        logger.info(f"Bot server starting on http://localhost:{port_to_use}") # Matches SECTIONS["STARTUP"]["start"]
-        web.run_app(SERVER_APP, host="localhost", port=port_to_use) # Changed from 0.0.0.0 to localhost for local development
+        logger.info(f"Bot server starting on http://0.0.0.0:{port_to_use}") # Matches SECTIONS["STARTUP"]["start"]
+        web.run_app(SERVER_APP, host="0.0.0.0", port=port_to_use) # Changed from localhost to 0.0.0.0
         logger.info("=== Bot server running ===") # Manual end marker
     except Exception as error:
         logger.critical(f"Failed to start bot server: {error}", exc_info=True)
