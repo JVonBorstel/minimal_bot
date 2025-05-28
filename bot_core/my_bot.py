@@ -25,6 +25,7 @@ from botbuilder.core import (  # type: ignore
     ConversationState,
     UserState,
     MemoryStorage,  # For state
+    CardFactory, # Moved CardFactory here
 )
 from botbuilder.schema import (  # type: ignore
     ChannelAccount,
@@ -33,7 +34,6 @@ from botbuilder.schema import (  # type: ignore
     SuggestedActions,
     CardAction,
     ActionTypes,  # Added SuggestedActions, CardAction, ActionTypes
-    CardFactory,
     CardImage,
 )
 

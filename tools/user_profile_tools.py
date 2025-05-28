@@ -65,7 +65,10 @@ async def _get_user_profile_and_data(app_state: AppState, turn_context: TurnCont
 @tool_function(
     name="list_my_preferences",
     description="Show your currently set preferences. This will list all preferences and their current values.",
-    parameters_schema={}, # No parameters needed
+    parameters_schema={
+        "type": "object",
+        "properties": {}
+    }, # Corrected schema for no parameters
     categories=["user", "profile", "preferences"],
     tags=["preferences", "settings", "profile", "view", "show", "list"],
     importance=1
