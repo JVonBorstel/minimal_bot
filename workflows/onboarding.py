@@ -242,10 +242,10 @@ class OnboardingWorkflow:
                 workflow.data["current_question_index"] = current_index
                 # Now check if onboarding is complete after this forced advancement
         if current_index >= len(ONBOARDING_QUESTIONS):
-                    log.info(f"process_answer: Forced advancement led to onboarding completion for workflow {workflow_id}.")
-                    return self._complete_onboarding(workflow) # Complete onboarding
-                # Otherwise, proceed to fetch the new current_question
-                log.info(f"process_answer: Forced advancement to main question index {current_index} for workflow {workflow_id}.")
+            log.info(f"process_answer: Forced advancement led to onboarding completion for workflow {workflow_id}.")
+            return self._complete_onboarding(workflow) # Complete onboarding
+        # Otherwise, proceed to fetch the new current_question
+        log.info(f"process_answer: Forced advancement to main question index {current_index} for workflow {workflow_id}.")
 
 
         if current_index >= len(ONBOARDING_QUESTIONS) and not workflow.data.get("processing_follow_ups"):
@@ -262,7 +262,7 @@ class OnboardingWorkflow:
                 log.error(f"Inconsistent state: processing_follow_ups is true but follow_up_index is out of bounds. WF: {workflow_id}")
                 return {"error": "Internal error: Inconsistent follow-up state."}
         else:
-        current_question = ONBOARDING_QUESTIONS[current_index]
+            current_question = ONBOARDING_QUESTIONS[current_index]
         
         # Validate and store the answer
         validation_result = self._validate_answer(current_question, user_input)
@@ -558,11 +558,11 @@ class OnboardingWorkflow:
                 final_credentials.pop("setup_declined", None)
                 
                 # Ensure tokens from answers are present if provided
-            if answers.get("github_token"):
+                if answers.get("github_token"):
                     final_credentials["github_token"] = answers["github_token"]
-            if answers.get("jira_email"):
+                if answers.get("jira_email"):
                     final_credentials["jira_email"] = answers["jira_email"]
-            if answers.get("jira_token"):
+                if answers.get("jira_token"):
                     final_credentials["jira_token"] = answers["jira_token"]
                 
                 # Only keep the personal_credentials field if it actually contains credentials
@@ -657,7 +657,7 @@ class OnboardingWorkflow:
         
         tool_prefs_ans = answers.get("tool_preferences")
         if tool_prefs_ans and isinstance(tool_prefs_ans, list) and tool_prefs_ans:
-            summary_items.append(f"🛠️ **Preferred Tools**: {(', '.join(tool_prefs_ans))}")
+            summary_items.append(f"��️ **Preferred Tools**: {(', '.join(tool_prefs_ans))}")
         
         if answers.get("communication_style"):
             summary_items.append(f"💬 **Communication Style**: {answers['communication_style']}")
