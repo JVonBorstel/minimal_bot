@@ -304,7 +304,8 @@ class JiraTools:
         log.info(f"Searching for Jira issues assigned to user: {effective_user_email}, status_category: {status_category}, max_results: {max_results}")
 
         try:
-            jql_parts = [f"assignee = \"{effective_user_email}\" OR assignee = currentUser() AND reporter = \"{effective_user_email}\""]
+            jql_parts = [f"assignee = \"{effective_user_email}\""]
+            
             if status_category and status_category.lower() != "all":
                 status_map = {
                     "to do": "To Do",
@@ -366,6 +367,112 @@ class JiraTools:
         except Exception as e:
             log.error(f"Unexpected error searching issues for user {effective_user_email}: {e}", exc_info=True)
             raise RuntimeError(f"Unexpected error searching issues: {e}")
+
+    @tool(name="jira_get_issues_by_project",
+          description="Lists issues within a specific Jira project using its project key (e.g., 'PROJ', 'DEV'). Optionally filters by status category. Returns summaries.",
+          parameters_schema={
+              "type": "object",
+              "properties": {
+                  "project_key": {
+                      "type": "string",
+                      "description": "The Jira project key (e.g., 'PROJ', 'DEV'). This is required."
+                  },
+                  "status_category": {
+                      "type": "string",
+                      "description": "Filter issues by status category. Leave empty or use 'all' to search all statuses.",
+                      "enum": ["to do", "in progress", "done", "all"],
+                      "default": "all"
+                  },
+                  "max_results": {
+                      "type": "integer",
+                      "description": "Maximum number of issues to return.",
+                      "default": 15
+                  }
+              },
+              "required": ["project_key"]
+          }
+    )
+    @requires_permission(Permission.JIRA_SEARCH_ISSUES, fallback_permission=Permission.JIRA_READ_ISSUES)
+    async def get_issues_by_project(self, app_state: AppState, project_key: str, status_category: Optional[Literal["to do", "in progress", "done", "all"]] = "all", max_results: int = 15) -> List[Dict[str, Any]]:
+        """
+        Lists issues within a specific Jira project by its key, optionally filtered by status category.
+
+        Args:
+            app_state: Application state containing user profile (injected by tool framework)
+            project_key: The Jira project key (e.g., 'PROJ', 'DEV').
+            status_category: Optional. Filter by status category: 'to do', 'in progress', 'done', 'all'. Defaults to 'all'.
+            max_results: Optional. Maximum number of issues to return. Defaults to 15.
+
+        Returns:
+            A list of dictionaries, where each dictionary is a summary of an issue.
+        """
+        if not project_key or not project_key.strip():
+            raise ValueError("Project key cannot be empty.")
+
+        log.info(f"Searching for Jira issues in project: {project_key}, status_category: {status_category}, max_results: {max_results}")
+
+        try:
+            jql_parts = [f'project = "{project_key.strip().upper()}"' ] # Project keys are often uppercase
+            if status_category and status_category.lower() != "all":
+                status_map = {
+                    "to do": "To Do",
+                    "in progress": "In Progress",
+                    "done": "Done"
+                }
+                jql_status_category = status_map.get(status_category.lower())
+                if jql_status_category:
+                    jql_parts.append(f'statusCategory = "{jql_status_category}"')
+                else:
+                    log.warning(f"Invalid status_category: {status_category}. Ignoring this filter for project search.")
+            
+            jql_query = " AND ".join(jql_parts) + " ORDER BY updated DESC"
+            log.debug(f"Constructed JQL query for project search: {jql_query}")
+
+        except Exception as e:
+            log.error(f"Error constructing JQL for project {project_key}: {e}", exc_info=True)
+            raise RuntimeError(f"Could not construct JQL to find issues for project {project_key}: {e}")
+
+        try:
+            fields_to_retrieve = "summary,status,project,issuetype,assignee,reporter,updated,priority,duedate,labels"
+            
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None, 
+                self._search_issues_sync,
+                app_state,
+                jql_query,
+                max_results,
+                fields_to_retrieve
+            )
+            
+            log.info(f"Found {len(results)} issues for project {project_key} with JQL: {jql_query}")
+            return results
+
+        except JIRAError as e:
+            rate_limit_headers = {}
+            if hasattr(e, 'response') and e.response is not None and hasattr(e.response, 'headers'):
+                headers = e.response.headers
+                rate_limit_headers['X-RateLimit-Limit'] = headers.get('X-RateLimit-Limit')
+                rate_limit_headers['X-RateLimit-Remaining'] = headers.get('X-RateLimit-Remaining')
+                rate_limit_headers['X-RateLimit-Reset'] = headers.get('X-RateLimit-Reset')
+                rate_limit_headers['Retry-After'] = headers.get('Retry-After')
+                rate_limit_headers = {k: v for k, v in rate_limit_headers.items() if v is not None}
+                if rate_limit_headers:
+                    log.warning(f"Jira API error in get_issues_by_project for '{project_key}' (status: {e.status_code}). Rate limit headers: {rate_limit_headers}")
+            
+            error_text = getattr(e, 'text', str(e))
+            if e.status_code == 400 and "project" in error_text.lower() and ("does not exist" in error_text.lower() or "not found" in error_text.lower()):
+                 log.warning(f"Jira project with key '{project_key}' might not exist. JQL: {jql_query}")
+                 raise RuntimeError(f"The Jira project '{project_key}' was not found. Please check the project key.")
+            elif "jql" in error_text.lower():
+                 log.error(f"Jira API JQL error ({e.status_code}) searching issues for project {project_key} with JQL '{jql_query}': {error_text}", exc_info=True)
+                 raise RuntimeError(f"Jira JQL query failed (Status: {e.status_code}): {error_text}. Query was: {jql_query}")
+            else:
+                 log.error(f"Jira API error ({e.status_code}) searching issues for project {project_key}: {error_text}", exc_info=True)
+                 raise RuntimeError(f"Jira API error ({e.status_code}) searching issues: {error_text}")
+        except Exception as e:
+            log.error(f"Unexpected error searching issues for project {project_key}: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error searching issues for project {project_key}: {e}")
 
     def health_check(self, app_state: Optional[AppState] = None) -> Dict[str, Any]:
         """
@@ -512,7 +619,7 @@ class JiraTools:
               "required": ["summary"]
           }
     )
-    @requires_permission(Permission.JIRA_READ_ISSUES, fallback_permission=Permission.READ_ONLY_ACCESS)
+    @requires_permission(Permission.JIRA_CREATE_ISSUE, fallback_permission=Permission.READ_ONLY_ACCESS)
     async def create_story(
         self, 
         app_state: AppState, 

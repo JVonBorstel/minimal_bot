@@ -941,6 +941,16 @@ class ToolSelector:
             if 'list_dir' in tool_dict:
                 boosted_tools.append('list_dir')
         
+        # Jira project issue listing
+        jira_project_keywords = ['project issues', 'issues in project', 'tickets in project']
+        # Attempt to match typical project key format (e.g., PROJ, DEV, TESTKEY)
+        project_key_pattern = r'\b[A-Z][A-Z0-9_]{1,15}\b' # Starts with letter, then letters/numbers/underscores
+        
+        if any(keyword in query_lower for keyword in jira_project_keywords) or \
+           (any(keyword in query_lower for keyword in jira_keywords) and re.search(project_key_pattern, query)): # query, not query_lower for regex on keys
+            if 'jira_get_issues_by_project' in tool_dict and 'jira_get_issues_by_project' not in boosted_tools:
+                boosted_tools.append('jira_get_issues_by_project')
+
         return boosted_tools
 
     def _identify_direct_intents(self, query: str, tool_dict: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -975,6 +985,13 @@ class ToolSelector:
            ('my' in query_lower):
             if 'jira_get_issues_by_user' in tool_dict:
                 direct_tools.append('jira_get_issues_by_user')
+        
+        # Jira project listing requests
+        if (('jira' in query_lower or 'tickets' in query_lower or 'issues' in query_lower) and 
+            ('project' in query_lower or re.search(r'\b[A-Z][A-Z0-9_]{1,15}\b', query))) and not \
+            any(kw in query_lower for kw in my_keywords): # Avoid clash with "my issues"
+            if 'jira_get_issues_by_project' in tool_dict and 'jira_get_issues_by_project' not in direct_tools:
+                direct_tools.append('jira_get_issues_by_project')
         
         # Code search requests
         if 'search' in query_lower and 'code' in query_lower:

@@ -1,0 +1,50 @@
+feat: Comprehensive bot enhancements and new features
+
+This commit introduces a major overhaul of the bot's core functionalities,
+intelligence, and user experience, including a new onboarding workflow,
+user preference management, and significant improvements to tool handling,
+Jira integration, and overall robustness.
+
+Key Enhancements:
+
+Core & Agent Logic:
+- Refactored `MyBot` for enhanced logging, improved state management (SQLite with WAL, Redis option), streaming responses, and smoother UI activity updates.
+- Advanced `agent_loop.py` to orchestrate LLM/tool interactions, inject user context (name, communication style) into system prompts, handle unresolved prior tool calls, and manage complex workflows (e.g., Story Builder).
+- Implemented `EnhancedBotHandler` for safer user input processing.
+- Added robust error handling, including `HistoryResetRequiredError` and `is_streaming` flag management to prevent deadlocks.
+
+Tool Management & Execution:
+- Revamped `ToolSelector` with a multi-stage selection strategy: direct intent matching, entity/keyword boosting (e.g., forcing GitHub tools for repo queries), "always include" tools, and semantic similarity with dynamic scoring adjustments (e.g., de-prioritizing web search if specific tools match).
+- Integrated permission-based filtering into `ToolSelector`, ensuring users only see tools they are authorized to use. `required_permission_name` is now part of tool metadata.
+- Implemented schema optimization in `ToolSelector` to reduce complexity for the LLM.
+- Made `ToolExecutor` more robust with eager tool module imports for reliable decorator-based registration.
+- `ToolExecutor` now correctly passes `app_state` and `config` to tool methods and injects permission metadata into tool definitions.
+- Enhanced logging in `ToolExecutor` with `log_tool_io` and `log_sanitizer`.
+
+New Features & Workflows:
+- Introduced a comprehensive `onboarding.py` workflow for new users:
+    - Collects preferred name, role, projects, tool preferences, communication style, and optional personal API credentials (GitHub, Jira) via a sequence of main and follow-up questions.
+    - Incrementally saves user preferences to their profile.
+    - Allows users to skip onboarding, retaining any answers provided.
+    - Provides a summary card upon completion and suggests a user role.
+- Added `user_profile_tools.py` enabling users to manage their preferences (`list_my_preferences`, `get_my_preference`, `set_my_preference`).
+- User preferences (e.g., name, communication style) are now used to personalize bot interactions.
+
+Jira Integration (`jira_tools.py`):
+- Enabled support for personal Jira credentials (from user profile) alongside shared credentials, prioritizing personal ones.
+- Correctly handles both scoped and unscoped Jira tokens (both via Basic Auth).
+- Tool methods (`get_issues_by_user`, `get_issues_by_project`, `create_story`) are now permission-gated using `@requires_permission`.
+- Blocking Jira API calls are executed asynchronously in a thread pool.
+- New `create_story` tool with support for templates (user_story, bug_fix, etc.) and intelligent field setting (assignee, story_points).
+- Improved health check to test personal credentials if available.
+
+User Authentication & Permissions:
+- Deepened integration of user authentication and permissions throughout the system.
+- Tool access and command execution are now contingent on user roles and permissions defined in `app_state`.
+- `UserProfile` now stores richer data including preferences and onboarding status.
+
+Testing:
+- Updated `tests/tools/test_jira_tool.py` to cover new functionalities like personal credential usage and the `create_story` tool, with comprehensive mocking.
+
+Untracked Files & Directories:
+- Added `bot_improvement_plan/`, `docs/`, `scripts/` which likely contain planning documents, documentation, and utility scripts supporting these new features. 

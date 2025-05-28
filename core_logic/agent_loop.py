@@ -200,6 +200,23 @@ async def start_streaming_response(
 
         # Ensure system prompt is in messages if defined and not already first
         system_prompt = config.get_system_prompt("Default")  # Use the config method to get system prompt
+        
+        # <<< --- ADDING USER CONTEXT TO SYSTEM PROMPT --- >>>
+        if app_state.current_user and app_state.current_user.profile_data:
+            preferences = app_state.current_user.profile_data.get("preferences", {})
+            preferred_name = preferences.get("preferred_name")
+            communication_style = preferences.get("communication_style")
+            user_display_name = app_state.current_user.display_name
+
+            if preferred_name and preferred_name.strip():
+                system_prompt += f"\n\nYour current user is named {preferred_name.strip()} (their display name is {user_display_name}). Address them by their preferred name, {preferred_name.strip()}, if appropriate."
+            else:
+                system_prompt += f"\n\nYour current user's display name is {user_display_name}."
+            
+            if communication_style and communication_style.strip():
+                system_prompt += f" Their preferred communication style is \"{communication_style.strip()}\". Please adapt your responses to this style."
+        # <<< --- END USER CONTEXT MODIFICATION --- >>>
+
         if system_prompt:
             if not app_state.messages or \
                not (app_state.messages[0].role == "system" and \

@@ -33,6 +33,8 @@ from botbuilder.schema import (  # type: ignore
     SuggestedActions,
     CardAction,
     ActionTypes,  # Added SuggestedActions, CardAction, ActionTypes
+    CardFactory,
+    CardImage,
 )
 
 # Assuming config.py is in the root or a path accessible via PYTHONPATH
@@ -107,17 +109,38 @@ _root_utils_spec.loader.exec_module(_root_utils_module_obj)
 
 # Import the correct sanitize_message_content from utils/utils.py that returns an integer
 try:
-    from utils.utils import sanitize_message_content, log_session_summary_adapted
-    # Import other functions from root utils.py as before
-    cleanup_messages = _root_utils_module_obj.cleanup_messages
-    optimize_tool_usage_stats = _root_utils_module_obj.optimize_tool_usage_stats
+    from utils.utils import (
+        sanitize_message_content,
+        log_session_summary_adapted,
+        cleanup_messages,
+        optimize_tool_usage_stats
+    )
+    logger.info("Successfully imported primary utilities (sanitize_message_content, log_session_summary_adapted, cleanup_messages, optimize_tool_usage_stats) from utils.utils package.")
+
+    # For any functions that are ONLY in the root utils.py and are still needed,
+    # they would need to be explicitly imported or accessed via _root_utils_module_obj.
+    # Example: if format_error_message and truncate_text from root utils.py are used by MyBot
+    # and not defined in utils/utils.py, they would be shadowed if not explicitly re-assigned here
+    # from _root_utils_module_obj. We need to verify their usage in MyBot.
+    # For now, assuming the four above are the primary ones with conflicting names.
+    if hasattr(_root_utils_module_obj, 'format_error_message'):
+        format_error_message = _root_utils_module_obj.format_error_message
+    if hasattr(_root_utils_module_obj, 'truncate_text'):
+        truncate_text = _root_utils_module_obj.truncate_text
+
 except ImportError as e:
-    logger.warning(f"Could not import from utils.utils, falling back to root utils.py: {e}")
-    # Fallback to root utils.py functions if utils/utils.py is not available
+    logger.warning(f"Could not import one or more primary utilities from utils.utils, falling back to root utils.py for all: {e}")
+    # Fallback to root utils.py functions if utils/utils.py or specific functions are not available
     sanitize_message_content = _root_utils_module_obj.sanitize_message_content
     cleanup_messages = _root_utils_module_obj.cleanup_messages
     optimize_tool_usage_stats = _root_utils_module_obj.optimize_tool_usage_stats
     log_session_summary_adapted = _root_utils_module_obj.log_session_summary_adapted
+    
+    # And also for any unique root functions if they were intended to be primary
+    if hasattr(_root_utils_module_obj, 'format_error_message'):
+        format_error_message = _root_utils_module_obj.format_error_message
+    if hasattr(_root_utils_module_obj, 'truncate_text'):
+        truncate_text = _root_utils_module_obj.truncate_text
 # --- End: Robust import ---
 
 # Import logging utilities using absolute path from the project's utils package
@@ -1112,8 +1135,20 @@ class MyBot(ActivityHandler):
                             meta_question_phrases = ["why?", "why", "why do you need this?", "why do you need this", "what for?", "what for", "what is this for?", "what is this for"]
                             if user_text_lower in meta_question_phrases:
                                 current_q_index = current_active_onboarding_workflow.data.get("current_question_index", 0)
-                                if 0 <= current_q_index < len(ONBOARDING_QUESTIONS):
+                                # Adjust for follow-up questions if necessary
+                                if current_active_onboarding_workflow.data.get("processing_follow_ups"):
+                                    follow_up_qs = current_active_onboarding_workflow.data.get("follow_up_questions", [])
+                                    follow_up_idx = current_active_onboarding_workflow.data.get("follow_up_index", 0)
+                                    if follow_up_idx < len(follow_up_qs):
+                                        current_onboarding_question_details = follow_up_qs[follow_up_idx]
+                                    else: # Should not happen if state is consistent
+                                        current_onboarding_question_details = None
+                                elif 0 <= current_q_index < len(ONBOARDING_QUESTIONS):
                                     current_onboarding_question_details = ONBOARDING_QUESTIONS[current_q_index]
+                                else:
+                                    current_onboarding_question_details = None
+
+                                if current_onboarding_question_details:
                                     explanation = current_onboarding_question_details.help_text
                                     original_question_text = current_onboarding_question_details.question
                                     
@@ -1122,17 +1157,18 @@ class MyBot(ActivityHandler):
                                     else:
                                         reply_text = "This information helps me tailor my assistance to you better."
                                     
-                                    # Re-send the original question with the explanation first
                                     await turn_context.send_activity(MessageFactory.text(reply_text))
                                     
-                                    # Format the original question again (as it might have choices)
-                                    # We can reuse the _format_question_response logic by temporarily setting the message part
-                                    # For simplicity here, we just resend the question text directly if no choices, 
-                                    # or re-format if it has choices. 
-                                    # A more robust way might be to call _format_question_response after sending the explanation.
+                                    # Re-format and send the original question again
+                                    current_progress_val = current_active_onboarding_workflow.data.get("current_question_index", 0)
+                                    # If processing follow-ups, progress might refer to the main question's index
+                                    if not current_active_onboarding_workflow.data.get("processing_follow_ups"):
+                                        current_progress_val += 1 # Display 1-based index
+                                    else: # For follow-ups, keep main question's index for progress display
+                                        current_progress_val = current_active_onboarding_workflow.data.get("current_question_index", 0) +1 
 
-                                    # To ensure choices are displayed correctly, re-format the question prompt slightly differently here
-                                    current_progress = f"**{current_active_onboarding_workflow.data.get('current_question_index', 0) + 1}/{current_active_onboarding_workflow.data.get('questions_total', len(ONBOARDING_QUESTIONS))}**"
+                                    total_questions_val = current_active_onboarding_workflow.data.get('questions_total', len(ONBOARDING_QUESTIONS))
+                                    current_progress = f"**{current_progress_val}/{total_questions_val}**"
                                     question_display_text = f"{current_progress} {original_question_text}"
                                     if current_onboarding_question_details.choices:
                                         formatted_choices = "\n".join(f"{i+1}. {choice}" for i, choice in enumerate(current_onboarding_question_details.choices))
@@ -1147,22 +1183,87 @@ class MyBot(ActivityHandler):
                                     logger_msg_activity.info(f"Provided explanation for onboarding question '{current_onboarding_question_details.key}' to user {user_profile.user_id}.",
                                                              extra={"event_type": "onboarding_meta_question_answered"})
                                     return # End turn, user can now answer with context
+                                else:
+                                    logger_msg_activity.warning(f"Could not retrieve current question details for meta-question. WF state: {current_active_onboarding_workflow.data}")
+                                    # Fallback if question details not found, just process answer
 
                             result = onboarding_handler.process_answer(current_active_onboarding_workflow.workflow_id, user_text_lower)
+                            
+                            # Import db_manager and invalidate_user_profile_cache here as they are used in multiple branches
+                            from user_auth import db_manager
+                            from user_auth.utils import invalidate_user_profile_cache
+
                             if result.get("error"):
                                 await turn_context.send_activity(MessageFactory.text(f"❌ {result['error']}"))
                                 return
                             if result.get("retry_question"):
                                 await turn_context.send_activity(MessageFactory.text(f"❌ {result['message']}"))
                                 return
-                            if result.get("completed"):
-                                await turn_context.send_activity(MessageFactory.text(result["message"]))
-                                from user_auth import db_manager 
-                                from user_auth.utils import invalidate_user_profile_cache
-                                profile_dict = onboarding_handler.user_profile.model_dump()
-                                db_manager.save_user_profile(profile_dict)
-                                # Invalidate cache to ensure fresh profile data is loaded next time
+                            
+                            # --- Start: New logic for incremental save and confirmation ---
+                            profile_dict_for_save = onboarding_handler.user_profile.model_dump()
+                            save_successful = db_manager.save_user_profile(profile_dict_for_save)
+                            
+                            if save_successful:
                                 invalidate_user_profile_cache(user_profile.user_id)
+                                logger_msg_activity.info(f"Successfully saved UserProfile for {user_profile.user_id} after onboarding answer/skip.", extra={"event_type": "onboarding_profile_increment_save"})
+                                
+                                saved_key = result.get("answer_saved_key")
+                                saved_value = result.get("answer_saved_value")
+                                was_skipped = result.get("question_skipped")
+
+                                if not result.get("completed"): # Don't send intermediate confirmations if onboarding just completed
+                                    if was_skipped:
+                                        # User skipped a non-required question
+                                        summary_of_saved = onboarding_handler.get_accumulated_answers_summary()
+                                        await turn_context.send_activity(MessageFactory.text(f"Okay, we'll skip that one. {summary_of_saved}"))
+                                        logger_msg_activity.info(f"User skipped non-required question '{saved_key}'. Summary sent.", extra={"event_type": "onboarding_question_skipped_ack"})
+                                    elif saved_key and saved_value is not None:
+                                        # User provided an answer, and it wasn't an empty skip for an optional question
+                                        # Map common keys to more readable versions for the message
+                                        readable_key_map = {
+                                            "welcome_name": "your preferred name",
+                                            "primary_role": "your primary role",
+                                            "main_projects": "your main projects",
+                                            "tool_preferences": "your tool preferences",
+                                            "communication_style": "your communication style",
+                                            "notifications": "your notification preference",
+                                            "personal_credentials": "your choice for personal credentials setup",
+                                            "github_token": "your GitHub token",
+                                            "jira_email": "your Jira email",
+                                            "jira_token": "your Jira API token"
+                                        }
+                                        display_key = readable_key_map.get(saved_key, f"your answer for '{saved_key}'")
+                                        
+                                        # For multi-choice, saved_value might be a list
+                                        display_value = saved_value
+                                        if isinstance(saved_value, list):
+                                            display_value = ", ".join(str(v) for v in saved_value)
+                                        elif isinstance(saved_value, bool): # For notifications_enabled being true/false
+                                            display_value = "enabled" if saved_value else "disabled"
+                                        elif saved_key == "notifications": # Original answer was yes/no
+                                            display_value = f"'{saved_value}' (notifications will be {'enabled' if saved_value == 'yes' else 'disabled'})"
+                                        elif saved_key == "personal_credentials":
+                                            display_value = f"'{saved_value}' (we'll ask for details if you said yes)"
+                                        else:
+                                            display_value = f"'{saved_value}'"
+
+                                        confirmation_msg = f"Thanks! I've noted {display_key} as {display_value}."
+                                        await turn_context.send_activity(MessageFactory.text(confirmation_msg))
+                                        logger_msg_activity.info(f"Sent confirmation for onboarding answer: key='{saved_key}'.", extra={"event_type": "onboarding_answer_confirmed"})
+                            else:
+                                logger_msg_activity.error(f"Failed to save UserProfile for {user_profile.user_id} after onboarding answer/skip.", extra={"event_type": "onboarding_profile_increment_save_failed"})
+                                # Inform user about save failure? Or rely on next operation failing?
+                                # For now, log and proceed. The state in memory is updated, but DB is stale.
+                            # --- End: New logic for incremental save and confirmation ---
+
+                            if result.get("completed"):
+                                # Message is now a card payload
+                                completion_card_payload = result["message"]
+                                completion_activity = MessageFactory.attachment(completion_card_payload)
+                                await turn_context.send_activity(completion_activity)
+                                
+                                # Profile is already saved by the incremental save block above
                                 if result.get("suggested_role"):
                                     admin_message = (f"\n\n🔒 **Admin Note**: User {user_profile.display_name} "
                                                      f"completed onboarding and was suggested role **{result['suggested_role']}**. "
@@ -1171,23 +1272,44 @@ class MyBot(ActivityHandler):
                                 logger_msg_activity.info(f"Completed onboarding for user {user_profile.user_id}",
                                                          extra={"event_type": "onboarding_completed", "suggested_role": result.get("suggested_role")})
                             else: 
-                                next_message = f"**{result['progress']}** {result['message']}"
-                                await turn_context.send_activity(MessageFactory.text(next_message))
+                                # Send next question, potentially with suggested actions
+                                next_question_text = f"**{result['progress']}** {result['message']}"
+                                next_question_activity = MessageFactory.text(next_question_text)
+                                if result.get("suggested_actions"):
+                                    next_question_activity.suggested_actions = SuggestedActions(
+                                        actions=result["suggested_actions"]
+                                    )
+                                await turn_context.send_activity(next_question_activity)
+                                
                                 logger_msg_activity.debug(f"Sent next onboarding question to user {user_profile.user_id}",
                                                           extra={"event_type": "onboarding_question_sent", "progress": result.get("progress")})
                                 return
                         elif OnboardingWorkflow.should_trigger_onboarding(user_profile, app_state):
                             logger_msg_activity.info(f"Triggering onboarding workflow for new user {user_profile.user_id}", extra={"event_type": "onboarding_workflow_triggered"})
                             workflow = onboarding_handler.start_workflow()
+                            
+                            # --- Create Welcome Hero Card ---
+                            welcome_card = CardFactory.hero_card(
+                                title="👋 Welcome to Augie!",
+                                text=f"Hi {user_profile.display_name}! I'm your AI assistant. A quick setup will help me tailor my responses and tools for you. You can type 'skip onboarding' at any time to bypass this.",
+                                images=[CardImage(url=self.app_config.settings.get("AUGIE_LOGO_URL", "https://raw.githubusercontent.com/Aughie/augie_images/main/logos_various_formats/logo_circle_transparent_256.png"))], # Optional: Add a logo if configured
+                                # No buttons on the welcome card to prevent misinterpretation of the button click as an answer to the first question.
+                                # The first question will be sent immediately after this card.
+                            )
+                            welcome_activity = MessageFactory.attachment(welcome_card)
+                            await turn_context.send_activity(welcome_activity)
+                            
+                            # --- Send First Actual Question (as a separate activity) ---
                             first_question_response = onboarding_handler._format_question_response(ONBOARDING_QUESTIONS[0], workflow)
-                            # MODIFIED WELCOME MESSAGE HERE
-                            welcome_message = (
-                                f"🎉 Hi {user_profile.display_name}, I'm Augie, your AI assistant! "
-                                f"Let's get you set up with a quick onboarding process.\n"
-                                f"(You can type 'skip onboarding' at any time to bypass this.)\n\n"
+                            
+                            first_question_activity = MessageFactory.text(
                                 f"**{first_question_response['progress']}** {first_question_response['message']}"
                             )
-                            await turn_context.send_activity(MessageFactory.text(welcome_message))
+                            if first_question_response.get("suggested_actions"):
+                                first_question_activity.suggested_actions = SuggestedActions(actions=first_question_response["suggested_actions"])
+                            
+                            await turn_context.send_activity(first_question_activity)
+                            
                             from user_auth import db_manager
                             profile_dict = user_profile.model_dump()
                             db_manager.save_user_profile(profile_dict)

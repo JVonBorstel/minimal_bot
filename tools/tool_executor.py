@@ -30,6 +30,7 @@ try:
     import tools.greptile_tools
     import tools.perplexity_tools
     import tools.core_tools  # Import core tools including help
+    import tools.user_profile_tools # Added for user preference management
     log_import_success = True
 except ImportError as e:
     log_import_success = False
