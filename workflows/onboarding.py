@@ -223,6 +223,28 @@ class OnboardingWorkflow:
         if workflow.workflow_type != "onboarding" or workflow.status != "active":
             return {"error": "Invalid workflow state"}
         
+        user_input_lower = user_input.lower().strip()
+
+        # --- START: Handle restart onboarding command ---
+        restart_onboarding_commands = ["restart onboarding", "start over onboarding", "reset my onboarding", "restart setup"]
+        if user_input_lower in restart_onboarding_commands:
+            log.info(f"User {self.user_profile.user_id} requested to restart onboarding. Workflow ID: {workflow_id}")
+            # Reset workflow data to initial state
+            workflow.data["current_question_index"] = 0
+            workflow.data["answers"] = {}
+            workflow.data["processing_follow_ups"] = False
+            workflow.data.pop("follow_up_questions", None)
+            workflow.data.pop("follow_up_index", None)
+            workflow.current_stage = "welcome_restarted"
+            workflow.add_history_event("WORKFLOW_RESTARTED", "User restarted onboarding process.", "welcome_restarted")
+            
+            # Get the first question again
+            first_question = ONBOARDING_QUESTIONS[0]
+            response = self._format_question_response(first_question, workflow)
+            response["message"] = "Okay, let's start the onboarding over. " + response["message"] # Prepend a confirmation
+            return response
+        # --- END: Handle restart onboarding command ---
+
         current_index = workflow.data.get("current_question_index", 0)
         
         # Handle case where current_index might be out of bounds due to follow-ups being processed
@@ -264,6 +286,18 @@ class OnboardingWorkflow:
         else:
             current_question = ONBOARDING_QUESTIONS[current_index]
         
+        # --- START: Improve name validation ---
+        if current_question.key == "welcome_name":
+            # Check for overly short names or command-like phrases more strictly for the name question
+            forbidden_name_phrases = ["reset", "skip", "help", "start over", "no", "yes", "@bot"]
+            if len(user_input_lower) < 2 or any(phrase in user_input_lower for phrase in forbidden_name_phrases):
+                return {
+                    "success": False,
+                    "message": "That doesn't seem like a typical name. Please provide a name you'd like me to call you, or type 'skip onboarding' to bypass setup.",
+                    "retry_question": True
+                }
+        # --- END: Improve name validation ---
+
         # Validate and store the answer
         validation_result = self._validate_answer(current_question, user_input)
         if not validation_result["valid"]:
@@ -657,7 +691,7 @@ class OnboardingWorkflow:
         
         tool_prefs_ans = answers.get("tool_preferences")
         if tool_prefs_ans and isinstance(tool_prefs_ans, list) and tool_prefs_ans:
-            summary_items.append(f"��️ **Preferred Tools**: {(', '.join(tool_prefs_ans))}")
+            summary_items.append(f"🛠️ **Preferred Tools**: {(', '.join(tool_prefs_ans))}")
         
         if answers.get("communication_style"):
             summary_items.append(f"💬 **Communication Style**: {answers['communication_style']}")

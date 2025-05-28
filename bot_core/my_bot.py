@@ -1367,6 +1367,45 @@ class MyBot(ActivityHandler):
         activity_text_lower = turn_context.activity.text.lower().strip() if turn_context.activity.text else "" 
         command_handled = False
 
+        # --- START: Handle @bot reset chat command ---
+        if activity_text_lower == "@bot reset chat":
+            command_handled = True
+            logger_msg_activity.info(f"User {app_state.current_user.user_id if app_state.current_user else 'unknown'} initiated chat reset.",
+                                     extra={"event_type": "chat_reset_initiated"})
+            
+            # Preserve session_id and current_user (if any)
+            original_session_id = app_state.session_id
+            original_current_user = app_state.current_user # This is a UserProfile object or None
+            
+            # Create a new, fresh AppState
+            app_state = self.AppStateModel(
+                session_id=original_session_id,
+                # Initialize with defaults from app_config
+                selected_model=self.app_config.GEMINI_MODEL,
+                available_personas=getattr(self.app_config, "AVAILABLE_PERSONAS", ["Default"]),
+                selected_persona=getattr(self.app_config, "DEFAULT_PERSONA", "Default"),
+                selected_perplexity_model=getattr(self.app_config, "PERPLEXITY_MODEL", "sonar-pro")
+            )
+            # Restore current_user if it existed
+            if original_current_user:
+                app_state.current_user = original_current_user
+                # If user profile exists, re-trigger onboarding check criteria
+                # This will make the bot offer onboarding if criteria are met after reset
+                logger_msg_activity.info(f"Restored user profile for {original_current_user.user_id} after chat reset.")
+
+            app_state.add_message(role="system", content="Chat history has been reset by the user.")
+            
+            # Save the reset state
+            await self.convo_state_accessor.set(turn_context, app_state)
+            await self.conversation_state.save_changes(turn_context, force=True) # Force save
+            
+            await turn_context.send_activity(MessageFactory.text("🔄 The chat history has been reset. How can I help you now?"))
+            
+            logger_msg_activity.info(f"Chat successfully reset for session {original_session_id}.",
+                                     extra={"event_type": "chat_reset_completed"})
+            return # Important: End processing for this turn
+        # --- END: Handle @bot reset chat command ---
+
         # --- Helper function for P3A.5.1: Get available tools based on user permissions (already defined above) ---
         # def get_available_tools_for_user() -> Dict[str, List[Dict[str, str]]]: ...
 
