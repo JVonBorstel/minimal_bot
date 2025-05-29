@@ -181,6 +181,12 @@ class LLMInterface:
             log.warning(f"Tool '{tool_name}': Invalid parameters format (not a dict): {type(parameters)}. Returning None.")
             return None
 
+        # Handle individual parameter schemas (those with anyOf, oneOf, etc.)
+        if "anyOf" in parameters or "oneOf" in parameters or "allOf" in parameters:
+            # This is an individual parameter schema, not a full parameters object
+            return self._convert_individual_parameter_to_schema(tool_name, parameters)
+
+        # Handle top-level parameters schema
         if parameters.get("type") != "object" or "properties" not in parameters:
             log.warning(f"Tool '{tool_name}': Invalid parameter structure. Expected 'type: object' with 'properties'. Got: {parameters}. Returning empty object schema.")
             return glm.Schema(type_=glm.Type.OBJECT, properties={})
@@ -211,147 +217,14 @@ class LLMInterface:
                 if not isinstance(prop_details, dict):
                     log.warning(f"Tool '{tool_name}': Skipping invalid property '{prop_name}'. Reason: Not a dict. Details: {prop_details}")
                     continue
- 
-                # Conditional description truncation (effectively disabled)
-                if "description" in prop_details and isinstance(prop_details["description"], str):
-                    orig_desc_len = len(prop_details["description"])
-                    if orig_desc_len > max_desc_len:
-                        prop_details["description"] = prop_details["description"][:max_desc_len-3] + "..."
 
-                prop_type_info = prop_details.get("type")
-                is_nullable = prop_details.get("nullable", False)
-                primary_type_str = "string" 
-
-                if isinstance(prop_type_info, str):
-                    primary_type_str = prop_type_info
-                    if primary_type_str.lower() == "null": 
-                        is_nullable = True
-                        primary_type_str = "string"
-                elif isinstance(prop_type_info, list):
-                    types_in_list = [str(t).lower() for t in prop_type_info] 
-                    if "null" in types_in_list: 
-                        is_nullable = True
-                    non_null_types = [t for t in types_in_list if t != "null"]
-                    if non_null_types: 
-                        primary_type_str = non_null_types[0]
-                    else: 
-                        is_nullable = True
-                        primary_type_str = "string"
-                elif "anyOf" in prop_details and isinstance(prop_details.get("anyOf"), list):
-                    any_of_types = []
-                    for item in prop_details["anyOf"]:
-                        if isinstance(item, dict) and "type" in item:
-                            item_type = str(item["type"]).lower()
-                            if item_type == "null": 
-                                is_nullable = True
-                            else: 
-                                any_of_types.append(item_type)
-                    if any_of_types: 
-                        primary_type_str = any_of_types[0]
-                    else: 
-                        is_nullable = True
-                        primary_type_str = "string"
-                elif prop_type_info is None and 'anyOf' not in prop_details:
-                    primary_type_str = "string"
-                    is_nullable = True
-
-                glm_type = self._get_glm_type_enum(primary_type_str)
-                enum_values = prop_details.get("enum")
-                if not enum_values and "anyOf" in prop_details and isinstance(prop_details.get("anyOf"), list):
-                    for item in prop_details["anyOf"]:
-                        if isinstance(item, dict) and "enum" in item and item.get("type") == primary_type_str:
-                            enum_values = item["enum"]
-                            if any(sub_item.get("type") == "null" for sub_item in prop_details["anyOf"] if isinstance(sub_item, dict)):
-                                is_nullable = True
-                            break
-                
-                # Conditional enum limiting (effectively disabled)
-                if enum_values and isinstance(enum_values, list) and len(enum_values) > max_enum_vals:
-                    enum_values = enum_values[:max_enum_vals]
-                
-                prop_schema_args = {
-                    "type_": glm_type, 
-                    "description": prop_details.get("description"),
-                    "nullable": is_nullable, 
-                }
-                if enum_values is not None:
-                    prop_schema_args["enum"] = enum_values
-                
-                if glm_type == glm.Type.OBJECT:
-                    # Handle nested objects
-                    if "properties" in prop_details and isinstance(prop_details["properties"], dict) and len(prop_details["properties"]) > max_nested_obj_props:
-                        prop_schema_args["type_"] = glm.Type.STRING 
-                        if "description" not in prop_schema_args or not prop_schema_args["description"]:
-                             prop_schema_args["description"] = f"Complex object with {len(prop_details['properties'])} properties, simplified."
-                        prop_schema_args.pop("properties", None)
-                        prop_schema_args.pop("required", None)
-                    else:
-                        nested_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}", prop_details)
-                        if nested_schema:
-                            prop_schema_args["properties"] = nested_schema.properties
-                            if nested_schema.required: 
-                                prop_schema_args["required"] = nested_schema.required
-                        else: 
-                            prop_schema_args["properties"] = {}
-
-                elif glm_type == glm.Type.ARRAY: 
-                    items_details = None
-                    if "items" in prop_details: 
-                        items_details = prop_details["items"]
-                    elif "anyOf" in prop_details and isinstance(prop_details["anyOf"], list):
-                        for element in prop_details["anyOf"]:
-                            if isinstance(element, dict) and element.get("type") == "array" and "items" in element:
-                                items_details = element["items"]
-                                break 
-                    
-                    # CRITICAL FIX: Ensure all arrays have valid items schemas
-                    if items_details and isinstance(items_details, dict):
-                        # Handle complex array item objects
-                        if items_details.get("type") == "object" and "properties" in items_details and isinstance(items_details["properties"], dict) and len(items_details["properties"]) > max_array_item_obj_props:
-                            items_details = {"type": "string", "description": "Simplified array item (was complex object)"}
-                    elif items_details is None:
-                        # CRITICAL FIX: Provide default items schema if missing
-                        log.warning(f"Tool '{tool_name}', Property '{prop_name}': Array type missing 'items' definition. Using string default.")
-                        items_details = {"type": "string", "description": "Array item (type not specified)"}
-                    
-                    if items_details and isinstance(items_details, dict) and "type" in items_details:
-                        items_type_str = items_details.get("type", "string")
-                        items_glm_type = self._get_glm_type_enum(items_type_str)
-                        items_schema_args = {
-                            "type_": items_glm_type, 
-                            "description": items_details.get("description"), 
-                            "nullable": items_details.get("nullable", False)
-                        }
-                        items_enum_values = items_details.get("enum")
-                        if items_enum_values is not None: 
-                            items_schema_args["enum"] = items_enum_values
-
-                        if items_glm_type == glm.Type.OBJECT:
-                             nested_item_schema = self._convert_parameters_to_schema(f"{tool_name}.{prop_name}[items]", items_details)
-                             if nested_item_schema:
-                                 items_schema_args["properties"] = nested_item_schema.properties
-                                 if nested_item_schema.required: 
-                                     items_schema_args["required"] = nested_item_schema.required
-                             else: 
-                                 items_schema_args["properties"] = {}
-                        
-                        items_schema_args = {k: v for k, v in items_schema_args.items() if v is not None}
-                        try:
-                            prop_schema_args["items"] = glm.Schema(**items_schema_args)
-                        except Exception as item_schema_ex:
-                             log.warning(f"Tool '{tool_name}', Property '{prop_name}': Failed to create glm.Schema for items. Details: {item_schema_ex}. Using string fallback.", exc_info=True)
-                             # CRITICAL FIX: Provide fallback items schema
-                             prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
-                    else:
-                        log.warning(f"Tool '{tool_name}', Property '{prop_name}': Could not create valid 'items' definition for array type. Using string fallback.")
-                        # CRITICAL FIX: Always provide a fallback items schema for arrays
-                        prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
-
-                prop_schema_args = {k: v for k, v in prop_schema_args.items() if v is not None}
+                # Convert individual parameter schema to glm.Schema
                 try:
-                    schema_props[prop_name] = glm.Schema(**prop_schema_args)
-                except Exception as prop_schema_ex:
-                    log.error(f"Tool '{tool_name}', Property '{prop_name}': Failed to create property schema: {prop_schema_ex}. Skipping property.", exc_info=True)
+                    param_schema = self._convert_individual_parameter_to_schema(f"{tool_name}.{prop_name}", prop_details)
+                    if param_schema:
+                        schema_props[prop_name] = param_schema
+                except Exception as e:
+                    log.error(f"Tool '{tool_name}', Property '{prop_name}': Failed to create property schema: {e}. Skipping property.", exc_info=True)
                     continue
 
             final_schema_args = {"type_": glm.Type.OBJECT, "properties": schema_props}
@@ -366,6 +239,160 @@ class LLMInterface:
         except Exception as e:
             log.error(f"Tool '{tool_name}': Error converting parameters dictionary to glm.Schema: {e}\nParameters: {parameters}", exc_info=True)
             return glm.Schema(type_=glm.Type.OBJECT, properties={}) # Fallback to empty object schema
+
+    def _convert_individual_parameter_to_schema(self, param_name: str, param_details: Dict[str, Any]) -> Optional[SchemaType]:
+        """
+        Convert an individual parameter schema to a glm.Schema.
+        Handles both simple types and complex schemas with anyOf/oneOf/allOf.
+        """
+        try:
+            # Conditional description truncation (effectively disabled)
+            max_desc_len = 9999
+            max_enum_vals = 999
+            max_nested_obj_props = 99
+            max_array_item_obj_props = 99
+            
+            if "description" in param_details and isinstance(param_details["description"], str):
+                orig_desc_len = len(param_details["description"])
+                if orig_desc_len > max_desc_len:
+                    param_details["description"] = param_details["description"][:max_desc_len-3] + "..."
+
+            param_type_info = param_details.get("type")
+            is_nullable = param_details.get("nullable", False)
+            primary_type_str = "string" 
+
+            if isinstance(param_type_info, str):
+                primary_type_str = param_type_info
+                if primary_type_str.lower() == "null": 
+                    is_nullable = True
+                    primary_type_str = "string"
+            elif isinstance(param_type_info, list):
+                types_in_list = [str(t).lower() for t in param_type_info] 
+                if "null" in types_in_list: 
+                    is_nullable = True
+                non_null_types = [t for t in types_in_list if t != "null"]
+                if non_null_types: 
+                    primary_type_str = non_null_types[0]
+                else: 
+                    is_nullable = True
+                    primary_type_str = "string"
+            elif "anyOf" in param_details and isinstance(param_details.get("anyOf"), list):
+                any_of_types = []
+                for item in param_details["anyOf"]:
+                    if isinstance(item, dict) and "type" in item:
+                        item_type = str(item["type"]).lower()
+                        if item_type == "null": 
+                            is_nullable = True
+                        else: 
+                            any_of_types.append(item_type)
+                if any_of_types: 
+                    primary_type_str = any_of_types[0]
+                else: 
+                    is_nullable = True
+                    primary_type_str = "string"
+            elif param_type_info is None and 'anyOf' not in param_details:
+                primary_type_str = "string"
+                is_nullable = True
+
+            glm_type = self._get_glm_type_enum(primary_type_str)
+            enum_values = param_details.get("enum")
+            if not enum_values and "anyOf" in param_details and isinstance(param_details.get("anyOf"), list):
+                for item in param_details["anyOf"]:
+                    if isinstance(item, dict) and "enum" in item and item.get("type") == primary_type_str:
+                        enum_values = item["enum"]
+                        if any(sub_item.get("type") == "null" for sub_item in param_details["anyOf"] if isinstance(sub_item, dict)):
+                            is_nullable = True
+                        break
+            
+            # Conditional enum limiting (effectively disabled)
+            if enum_values and isinstance(enum_values, list) and len(enum_values) > max_enum_vals:
+                enum_values = enum_values[:max_enum_vals]
+            
+            prop_schema_args = {
+                "type_": glm_type, 
+                "description": param_details.get("description"),
+                "nullable": is_nullable, 
+            }
+            if enum_values is not None:
+                prop_schema_args["enum"] = enum_values
+            
+            if glm_type == glm.Type.OBJECT:
+                # Handle nested objects
+                if "properties" in param_details and isinstance(param_details["properties"], dict):
+                    if len(param_details["properties"]) > max_nested_obj_props:
+                        prop_schema_args["type_"] = glm.Type.STRING 
+                        if "description" not in prop_schema_args or not prop_schema_args["description"]:
+                             prop_schema_args["description"] = f"Complex object with {len(param_details['properties'])} properties, simplified."
+                        prop_schema_args.pop("properties", None)
+                        prop_schema_args.pop("required", None)
+                    else:
+                        # Convert nested object properties
+                        nested_props = {}
+                        for nested_prop_name, nested_prop_details in param_details["properties"].items():
+                            if isinstance(nested_prop_details, dict):
+                                nested_schema = self._convert_individual_parameter_to_schema(
+                                    f"{param_name}.{nested_prop_name}", nested_prop_details
+                                )
+                                if nested_schema:
+                                    nested_props[nested_prop_name] = nested_schema
+                        prop_schema_args["properties"] = nested_props
+                        
+                        # Handle required fields for nested object
+                        nested_required = param_details.get("required", [])
+                        if nested_required and any(req in nested_props for req in nested_required):
+                            valid_nested_required = [req for req in nested_required if req in nested_props]
+                            if valid_nested_required:
+                                prop_schema_args["required"] = valid_nested_required
+                else:
+                    # Object type but no properties - convert to string for simplicity
+                    prop_schema_args["type_"] = glm.Type.STRING
+                    if "description" not in prop_schema_args or not prop_schema_args["description"]:
+                        prop_schema_args["description"] = "Object parameter (simplified to string)"
+
+            elif glm_type == glm.Type.ARRAY: 
+                items_details = None
+                if "items" in param_details: 
+                    items_details = param_details["items"]
+                elif "anyOf" in param_details and isinstance(param_details["anyOf"], list):
+                    for element in param_details["anyOf"]:
+                        if isinstance(element, dict) and element.get("type") == "array" and "items" in element:
+                            items_details = element["items"]
+                            break 
+                
+                # CRITICAL FIX: Ensure all arrays have valid items schemas
+                if items_details and isinstance(items_details, dict):
+                    # Handle complex array item objects
+                    if items_details.get("type") == "object" and "properties" in items_details and isinstance(items_details["properties"], dict) and len(items_details["properties"]) > max_array_item_obj_props:
+                        items_details = {"type": "string", "description": "Simplified array item (was complex object)"}
+                elif items_details is None:
+                    # CRITICAL FIX: Provide default items schema if missing
+                    log.warning(f"Parameter '{param_name}': Array type missing 'items' definition. Using string default.")
+                    items_details = {"type": "string", "description": "Array item (type not specified)"}
+                
+                if items_details and isinstance(items_details, dict):
+                    items_schema = self._convert_individual_parameter_to_schema(f"{param_name}[items]", items_details)
+                    if items_schema:
+                        prop_schema_args["items"] = items_schema
+                    else:
+                        # Fallback items schema
+                        prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
+                else:
+                    log.warning(f"Parameter '{param_name}': Could not create valid 'items' definition for array type. Using string fallback.")
+                    # CRITICAL FIX: Always provide a fallback items schema for arrays
+                    prop_schema_args["items"] = glm.Schema(type_=glm.Type.STRING, description="Fallback string item")
+
+            # Remove None values before creating schema
+            prop_schema_args = {k: v for k, v in prop_schema_args.items() if v is not None}
+            return glm.Schema(**prop_schema_args)
+            
+        except Exception as e:
+            log.error(f"Parameter '{param_name}': Failed to create schema: {e}. Using string fallback.", exc_info=True)
+            # Return a simple string schema as fallback
+            return glm.Schema(
+                type_=glm.Type.STRING, 
+                description=param_details.get("description", f"Error processing schema for {param_name}"),
+                nullable=True
+            )
 
     def prepare_tools_for_sdk(self, tool_definitions: List[Dict[str, Any]], query: Optional[str] = None, app_state: Optional[AppState] = None) -> Optional[ToolType]:
         """
@@ -549,7 +576,12 @@ class LLMInterface:
             raise ImportError("google-genai SDK is required but not available.")
 
         current_config = get_config() # Get current config instance
-        llm_call_id = start_llm_call() # Start LLM call context
+        llm_call_id = start_llm_call(model_name=self.model_name) # Start LLM call context
+
+        # Retry configuration for quota errors
+        max_retries = 3
+        base_delay = 5  # seconds
+        max_delay = 60  # seconds
 
         try:
             sdk_tool_obj: Optional[ToolType] = None
@@ -646,72 +678,90 @@ class LLMInterface:
                     log.debug(f"LLM Input Summary ({len(final_contents)} items):\n" + "\n".join(log_messages_summary))
                 except Exception as debug_e: log.warning(f"Error generating LLM input summary: {debug_e}")
 
-
             log.info(f"Sending {len(final_contents)} content items to LLM ({self.model_name}), streaming. Tools provided: {bool(sdk_tool_obj)}")
             if sdk_tool_obj and hasattr(sdk_tool_obj, 'function_declarations'):
                 log.debug(f"  Tool details: {len(sdk_tool_obj.function_declarations)} function declarations: {[fd.name for fd in sdk_tool_obj.function_declarations[:5]]}...") # Log first 5
             
-            response_stream = self.model.generate_content(
-                contents=final_contents,
-                generation_config=generation_config,
-                safety_settings=safety_settings,
-                tools=sdk_tool_obj,
-                tool_config={"function_calling_config": {"mode": "AUTO"}} if sdk_tool_obj else None,
-                stream=True,
-                request_options={'timeout': self.timeout}
-            )
-            log.debug(f"Received streaming response iterator from LLM: {self.model_name}")
-
-            # Wrapper iterator to log response chunks
-            def response_logging_iterator(stream):
-                full_response_chunks = []
+            # Retry loop for API calls with exponential backoff
+            last_exception = None
+            for attempt in range(max_retries + 1):  # 0, 1, 2, 3 (4 total attempts)
                 try:
-                    for chunk in stream:
-                        if current_config.settings.log_llm_interaction:
-                            # Log each chunk if verbose logging is on.
-                            # Need to ensure 'chunk' is serializable or convert it.
-                            # Similar to request, SDK objects might need to_dict()
-                            try:
-                                if hasattr(chunk, 'to_dict'):
-                                    log_chunk_data = chunk.to_dict()
+                    response_stream = self.model.generate_content(
+                        contents=final_contents,
+                        generation_config=generation_config,
+                        safety_settings=safety_settings,
+                        tools=sdk_tool_obj,
+                        tool_config={"function_calling_config": {"mode": "AUTO"}} if sdk_tool_obj else None,
+                        stream=True,
+                        request_options={'timeout': self.timeout}
+                    )
+                    log.debug(f"Received streaming response iterator from LLM: {self.model_name}")
+
+                    # Wrapper iterator to log response chunks
+                    def response_logging_iterator(stream):
+                        full_response_chunks = []
+                        try:
+                            for chunk in stream:
+                                if current_config.settings.log_llm_interaction:
+                                    # Log each chunk if verbose logging is on.
+                                    # Need to ensure 'chunk' is serializable or convert it.
+                                    # Similar to request, SDK objects might need to_dict()
+                                    try:
+                                        if hasattr(chunk, 'to_dict'):
+                                            log_chunk_data = chunk.to_dict()
+                                        else:
+                                            log_chunk_data = str(chunk) # Fallback
+                                        
+                                        # Storing for full response log later, before sanitization for that log
+                                        full_response_chunks.append(log_chunk_data)
+
+                                        # log.debug( # Changed to debug to avoid flooding logs for every chunk unless specifically needed
+                                        # "LLM Response Chunk",
+                                        # extra={"event_type": "llm_response_chunk", "data": sanitize_data(log_chunk_data)}
+                                        # )
+                                    except Exception as e:
+                                        log.warning(f"Could not serialize LLM response chunk for logging: {e}")
                                 else:
-                                    log_chunk_data = str(chunk) # Fallback
-                                
-                                # Storing for full response log later, before sanitization for that log
-                                full_response_chunks.append(log_chunk_data)
+                                    # If not logging full interaction, we still might need to collect chunks
+                                    # if other logic depends on full_response_chunks (e.g. for a final summary log).
+                                    # For now, only collect if log_llm_interaction is true for the final log.
+                                    pass 
+                                yield chunk
+                        finally:
+                            if current_config.settings.log_llm_interaction and full_response_chunks:
+                                # Log the complete aggregated response
+                                sanitized_full_response = sanitize_data({"response_chunks": full_response_chunks})
+                                log.info(
+                                    "LLM Full Response Details",
+                                    extra={"event_type": "llm_response_payload", "data": sanitized_full_response}
+                                )
+                    
+                    return response_logging_iterator(response_stream)
 
-                                # log.debug( # Changed to debug to avoid flooding logs for every chunk unless specifically needed
-                                # "LLM Response Chunk",
-                                # extra={"event_type": "llm_response_chunk", "data": sanitize_data(log_chunk_data)}
-                                # )
-                            except Exception as e:
-                                log.warning(f"Could not serialize LLM response chunk for logging: {e}")
-                        else:
-                            # If not logging full interaction, we still might need to collect chunks
-                            # if other logic depends on full_response_chunks (e.g. for a final summary log).
-                            # For now, only collect if log_llm_interaction is true for the final log.
-                            pass 
-                        yield chunk
-                finally:
-                    if current_config.settings.log_llm_interaction and full_response_chunks:
-                        # Log the complete aggregated response
-                        sanitized_full_response = sanitize_data({"response_chunks": full_response_chunks})
-                        log.info(
-                            "LLM Full Response Details",
-                            extra={"event_type": "llm_response_payload", "data": sanitized_full_response}
-                        )
-            
-            return response_logging_iterator(response_stream)
+                except google_exceptions.ResourceExhausted as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        # Calculate delay with exponential backoff
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        log.warning(f"Google API quota exceeded (attempt {attempt + 1}/{max_retries + 1}). Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        log.error(f"Google API quota exceeded after {max_retries + 1} attempts. Giving up.")
+                        raise e
 
-        except google_exceptions.GoogleAPIError as e:
-            log.error(f"Google API error during streaming call ({self.model_name}): {e}", exc_info=True)
-            if isinstance(e, google_exceptions.ResourceExhausted): log.error("Quota limit likely reached.")
-            elif isinstance(e, google_exceptions.PermissionDenied): log.error("Permission denied. Check API key permissions.")
-            elif isinstance(e, google_exceptions.InvalidArgument): log.error(f"Invalid argument provided to API: {e}")
-            raise e
-        except (requests_exceptions.RequestException, TimeoutError) as e:
-            log.error(f"Network error during LLM streaming call: {e}", exc_info=True)
-            raise RuntimeError(f"Network error during LLM streaming call: {e}") from e 
+                except google_exceptions.GoogleAPIError as e:
+                    log.error(f"Google API error during streaming call ({self.model_name}): {e}", exc_info=True)
+                    if isinstance(e, google_exceptions.PermissionDenied): 
+                        log.error("Permission denied. Check API key permissions.")
+                    elif isinstance(e, google_exceptions.InvalidArgument): 
+                        log.error(f"Invalid argument provided to API: {e}")
+                    raise e
+
+                except (requests_exceptions.RequestException, TimeoutError) as e:
+                    log.error(f"Network error during LLM streaming call: {e}", exc_info=True)
+                    raise RuntimeError(f"Network error during LLM streaming call: {e}") from e 
+
         except Exception as e:
             log.error(f"Unexpected error during streaming LLM call ({self.model_name}): {e}", exc_info=True)
             raise RuntimeError(f"LLM stream generation failed: {e}") from e

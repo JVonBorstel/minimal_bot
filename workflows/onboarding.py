@@ -225,6 +225,43 @@ class OnboardingWorkflow:
         
         user_input_lower = user_input.lower().strip()
 
+        # --- START: Detect if user is asking a question instead of answering ---
+        question_indicators = [
+            "what is", "what's", "whats", "who is", "who's", "how do", "how can", 
+            "where is", "where's", "when is", "when's", "why is", "why's", "why",
+            "can you", "could you", "will you", "would you", "do you", "are you",
+            "tell me", "explain", "help me", "show me"
+        ]
+        
+        if (user_input.endswith("?") or 
+            any(indicator in user_input_lower for indicator in question_indicators)):
+            
+            # User seems to be asking a question, not answering the onboarding question
+            current_index = workflow.data.get("current_question_index", 0)
+            
+            if workflow.data.get("processing_follow_ups"):
+                follow_up_questions = workflow.data.get("follow_up_questions", [])
+                follow_up_index = workflow.data.get("follow_up_index", 0)
+                if follow_up_index < len(follow_up_questions):
+                    current_question = follow_up_questions[follow_up_index]
+                else:
+                    current_question = None
+            elif current_index < len(ONBOARDING_QUESTIONS):
+                current_question = ONBOARDING_QUESTIONS[current_index]
+            else:
+                current_question = None
+            
+            if current_question:
+                # Respond that we're in onboarding mode and re-ask the question
+                return {
+                    "success": False,
+                    "message": f"I noticed you asked a question, but I'm currently waiting for your answer to the setup question. Let me ask again:\n\n{current_question.question}\n\n(If you'd like to skip setup entirely, type 'skip onboarding')",
+                    "retry_question": True
+                }
+            else:
+                return {"error": "Unable to determine current onboarding question"}
+        # --- END: Question detection ---
+
         # --- START: Handle restart onboarding command ---
         restart_onboarding_commands = ["restart onboarding", "start over onboarding", "reset my onboarding", "restart setup"]
         if user_input_lower in restart_onboarding_commands:
@@ -718,9 +755,10 @@ class OnboardingWorkflow:
 
         card_text += "\n\n**What's Next?**"
 
+        # Convert CardAction objects to dictionaries for serialization, ensuring ActionTypes is stringified
         buttons = [
-            CardAction(type=ActionTypes.im_back, title="Explore Commands (@augie help)", value="@augie help"),
-            CardAction(type=ActionTypes.im_back, title="Manage My Preferences", value="@augie preferences")
+            {"type": ActionTypes.im_back.value, "title": "Explore Commands (@augie help)", "value": "@augie help"},
+            {"type": ActionTypes.im_back.value, "title": "Manage My Preferences", "value": "@augie preferences"}
         ]
         
         # Using CardFactory structure for a HeroCard
@@ -753,8 +791,8 @@ class OnboardingWorkflow:
         
         self.user_profile.profile_data["onboarding_status"] = "skipped"
         self.user_profile.profile_data["onboarding_skipped_at"] = datetime.utcnow().isoformat()
-        # Ensure onboarding_completed is explicitly false if skipped
-        self.user_profile.profile_data["onboarding_completed"] = False 
+        # Mark onboarding as completed even when skipped to prevent retriggering
+        self.user_profile.profile_data["onboarding_completed"] = True
 
         # Consolidate any collected answers into preferences, similar to _complete_onboarding
         # This ensures that if skip happens before _complete_onboarding, preferences are still structured.

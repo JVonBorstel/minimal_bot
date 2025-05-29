@@ -303,11 +303,30 @@ class ToolExecutor:
             # Check if the tool exists and is configured
             if tool_name not in self.configured_tools:
                 log.error(f"Cannot execute unconfigured tool '{tool_name}'", extra=log_extra_base)
-                error_payload = {
-                    "status": "ERROR",
-                    "error_type": "ToolNotConfigured" if tool_name in get_registered_tools() else "ToolNotFound",
-                    "message": f"Tool '{tool_name}' is not configured or does not exist."
-                }
+                
+                # Provide more helpful error messages based on the tool type
+                if tool_name in get_registered_tools():
+                    # Tool exists but isn't configured
+                    service_name = self._get_service_name_from_tool(tool_name)
+                    friendly_message = self._get_configuration_help_message(service_name, tool_name)
+                    error_payload = {
+                        "status": "ERROR",
+                        "error_type": "ToolNotConfigured",
+                        "message": friendly_message,
+                        "service": service_name,
+                        "actionable_advice": self._get_actionable_advice(service_name),
+                        "fallback_suggestions": self._get_fallback_suggestions(service_name, tool_name)
+                    }
+                else:
+                    # Tool doesn't exist at all
+                    error_payload = {
+                        "status": "ERROR", 
+                        "error_type": "ToolNotFound",
+                        "message": f"I don't have a tool called '{tool_name}'. Use the 'help' command to see available tools.",
+                        "actionable_advice": "Try asking for help to see what tools are available.",
+                        "fallback_suggestions": ["Use '@bot help' to see available commands", "Try rephrasing your request"]
+                    }
+                
                 log.info(
                     f"Tool Execution Summary: {tool_name} - FAILED (Not Configured/Found)",
                     extra={
@@ -443,3 +462,65 @@ class ToolExecutor:
             return error_payload
         finally:
             clear_tool_call_id() # Clear tool call ID in all cases
+
+    def _get_service_name_from_tool(self, tool_name: str) -> str:
+        """Extract service name from tool name."""
+        if tool_name.startswith("github_"):
+            return "github"
+        elif tool_name.startswith("jira_"):
+            return "jira"
+        elif tool_name.startswith("greptile_"):
+            return "greptile"
+        elif tool_name.startswith("perplexity_"):
+            return "perplexity"
+        else:
+            return "unknown"
+    
+    def _get_configuration_help_message(self, service_name: str, tool_name: str) -> str:
+        """Generate helpful configuration error messages."""
+        service_messages = {
+            "github": "🔧 GitHub tools aren't set up yet. I need a GitHub Personal Access Token to access repositories, issues, and pull requests.",
+            "jira": "🔧 Jira tools aren't fully configured. I need Jira API credentials (email and token) to access your tickets and projects.",
+            "greptile": "🔧 Greptile code search isn't configured. I need a Greptile API key to search through codebases.",
+            "perplexity": "🔧 Perplexity web search isn't configured. I need a Perplexity API key to search the web for information."
+        }
+        
+        return service_messages.get(service_name, f"🔧 The {service_name} service isn't configured properly.")
+    
+    def _get_actionable_advice(self, service_name: str) -> str:
+        """Generate actionable advice for configuration issues."""
+        advice = {
+            "github": "Ask your administrator to add GITHUB_TOKEN to the environment variables, or provide your own GitHub Personal Access Token through the onboarding process.",
+            "jira": "Ask your administrator to verify JIRA_API_EMAIL and JIRA_API_TOKEN are set correctly, or provide your own Jira credentials through onboarding.",
+            "greptile": "Ask your administrator to add GREPTILE_API_KEY to the environment variables.",
+            "perplexity": "Ask your administrator to add PERPLEXITY_API_KEY to the environment variables."
+        }
+        
+        return advice.get(service_name, "Contact your administrator to configure this service.")
+    
+    def _get_fallback_suggestions(self, service_name: str, tool_name: str) -> List[str]:
+        """Generate fallback suggestions when tools aren't available."""
+        fallbacks = {
+            "github": [
+                "I can help you with Jira tickets instead",
+                "Try asking me to search the web for GitHub-related information",
+                "You can manually check GitHub.com for your repositories"
+            ],
+            "jira": [
+                "I can help you search the web for Jira-related information",
+                "Try asking me about GitHub repositories instead",
+                "You can manually check your Jira instance for tickets"
+            ],
+            "greptile": [
+                "I can help you search the web for code examples",
+                "Try asking me about your GitHub repositories or Jira tickets",
+                "You can search your codebase manually using your IDE or GitHub"
+            ],
+            "perplexity": [
+                "I can help you with GitHub repositories or Jira tickets",
+                "Try asking me about your configured tools instead",
+                "You can search the web manually using your browser"
+            ]
+        }
+        
+        return fallbacks.get(service_name, ["Try asking about available tools with '@bot help'"])

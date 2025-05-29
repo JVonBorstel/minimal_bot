@@ -6,6 +6,7 @@ import os
 import sys
 import logging
 from typing import Dict, Any, cast # Added cast for type hinting
+import re
 
 from llm_interface import LLMInterface # Keep this, it's used in the shim
 from tools.tool_executor import ToolExecutor # Keep this, it's used in the shim
@@ -25,52 +26,29 @@ from dotenv import load_dotenv, find_dotenv
 APP_VERSION = "1.0.0"
 
 # ===== Standard Logging Setup =====
-# COLORS and SECTIONS definitions remain unchanged, omitted for brevity but should be in your actual file.
+# COLORS and SECTIONS definitions are now primarily for SimpleHumanFormatter in utils.logging_config
+# We might still keep COLORS here if other parts of app.py use them directly for prints.
 COLORS = {
     "reset": "\033[0m", "bold": "\033[1m", "header": "\033[1;36m", "success": "\033[1;32m",
     "warning": "\033[1;33m", "error": "\033[1;31m", "info": "\033[1;34m", "debug": "\033[0;37m"
 }
-SECTIONS = {
-    "ENV": {"start": "=== LOADING ENVIRONMENT VARIABLES ===", "title": f"{COLORS['header']}[KEY] Environment Setup{COLORS['reset']}", "end": "=== ENVIRONMENT LOADED SUCCESSFULLY ==="},
-    "CONFIG": {"start": "=== CONFIG VALIDATION RESULTS ===", "title": f"{COLORS['header']}[GEAR] Configuration{COLORS['reset']}", "end": "=== CONFIG VALIDATED ==="},
-    "STARTUP": {"start": "Bot server starting on", "title": f"{COLORS['header']}[ROCKET] Bot Server Startup{COLORS['reset']}", "end": "=== Bot server running ==="}
-}
+# SECTIONS dictionary might be removed from here if fully managed by SimpleHumanFormatter
+# or kept for reference if app.py still directly uses its keys for logic.
+# For now, let's comment it out from app.py as SimpleHumanFormatter will have its own version.
+# SECTIONS = {
+#     "ENV": {"start": "=== LOADING ENVIRONMENT VARIABLES ===", "title": f"{COLORS['header']}[KEY] Environment Setup{COLORS['reset']}", "end": "=== ENVIRONMENT LOADED SUCCESSFULLY ==="},
+#     "CONFIG": {"start": "=== CONFIG VALIDATION RESULTS ===", "title": f"{COLORS['header']}[GEAR] Configuration{COLORS['reset']}", "end": "=== CONFIG VALIDATED ==="},
+#     "STARTUP": {"start": "Bot server starting on", "title": f"{COLORS['header']}[ROCKET] Bot Server Startup{COLORS['reset']}", "end": "=== Bot server running ==="}
+# }
 
-# ColoredFormatter class remains unchanged, omitted for brevity but should be in your actual file.
-class ColoredFormatter(logging.Formatter):
-    def __init__(self, fmt=None, datefmt=None, use_colors=True):
-        if fmt is None: fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        super().__init__(fmt, datefmt, style='%'); self.use_colors = use_colors
-    def format(self, record):
-        handler_stream = None
-        if record.levelno >= logging.INFO:
-            for h in logging.getLogger().handlers:
-                if hasattr(h, 'stream'): handler_stream = h.stream; break
-        for section_name, section_details in SECTIONS.items():
-            if isinstance(record.msg, str):
-                if section_details["start"] in record.msg or (section_details["start"].endswith("v") and record.msg.startswith(section_details["start"])):
-                    if handler_stream and self.use_colors: handler_stream.write(f"\n{'=' * 50}\n{section_details['title']}\n{'-' * 50}\n\n"); handler_stream.flush()
-                    break
-                elif section_details["end"] in record.msg:
-                    if handler_stream and self.use_colors: handler_stream.write(f"\n{'-' * 50}\n{COLORS['info']}Section {section_name} completed{COLORS['reset']}\n{'=' * 50}\n\n"); handler_stream.flush()
-                    break
-        log_record = logging.makeLogRecord(record.__dict__)
-        if self.use_colors:
-            if any(color in str(log_record.msg) for color in COLORS.values()): pass
-            elif record.levelno >= logging.ERROR: log_record.levelname = f"{COLORS['error']}{record.levelname}{COLORS['reset']}"; log_record.msg = f"{COLORS['error']}{record.msg}{COLORS['reset']}"
-            elif record.levelno >= logging.WARNING: log_record.levelname = f"{COLORS['warning']}{record.levelname}{COLORS['reset']}";
-            if isinstance(record.msg, str) and record.msg.startswith("Warning:"): log_record.msg = f"{COLORS['warning']}{record.msg}{COLORS['reset']}"
-            elif record.levelno >= logging.INFO: log_record.levelname = f"{COLORS['info']}{record.levelname}{COLORS['reset']}";
-            if isinstance(record.msg, str) and record.msg.startswith("Success:"): log_record.msg = f"{COLORS['success']}{record.msg}{COLORS['reset']}"
-            else: log_record.levelname = f"{COLORS['debug']}{record.levelname}{COLORS['reset']}"
-        return super().format(log_record)
+# The root_logger setup here will be overridden by IntelligentLoggingSystem,
+# but we need a basic logger for VERY early messages if any, or for utilities
+# that might log before IntelligentLoggingSystem is fully up.
+# However, IntelligentLoggingSystem now clears root handlers, so this initial
+# setup becomes less critical for console output formatting once utils.logging_config is imported.
 
-root_logger = logging.getLogger()
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(ColoredFormatter())
-root_logger.addHandler(console_handler)
-root_logger.setLevel(logging.INFO) # Initial level, config can override
-
+# Keep a basic logger instance for app.py itself, but its console output
+# will be managed by the handlers set up in utils.logging_config.py
 logger = logging.getLogger(__name__)
 
 # Quieten noisy libraries
@@ -89,18 +67,46 @@ def load_environment():
     for dotenv_path in possible_paths:
         if dotenv_path and os.path.exists(dotenv_path):
             env_path_found = dotenv_path
-            logger.info(f"Found .env file at: {env_path_found}")
+            # logger.info(f"Found .env file at: {env_path_found}") # Quieter
             load_dotenv(dotenv_path, override=True); env_loaded = True; break
+    
+    env_summary = {}
+    env_warnings = []
+
     if env_loaded:
-        logger.info(f"SUCCESS: Loaded .env file from: {env_path_found}")
-        critical_vars = ['JIRA_API_URL', 'JIRA_API_EMAIL', 'JIRA_API_TOKEN', 'GREPTILE_API_KEY', 'PERPLEXITY_API_KEY', 'GEMINI_API_KEY', 'MICROSOFT_APP_ID', 'MICROSOFT_APP_PASSWORD']
-        logger.info("Environment variable status (partial values for security):")
-        for var in critical_vars:
+        logger.info(f"Environment: Loaded .env from {env_path_found}")
+        critical_vars = {
+            'JIRA_API_URL': True, 'JIRA_API_EMAIL': True, 'JIRA_API_TOKEN': False, # Token value not logged
+            'GREPTILE_API_KEY': False, 'PERPLEXITY_API_KEY': False, 'GEMINI_API_KEY': False,
+            'MICROSOFT_APP_ID': True, 'MICROSOFT_APP_PASSWORD': False
+        }
+        
+        loaded_vars_summary = []
+        for var, log_value in critical_vars.items():
             val = os.environ.get(var)
-            if val: logger.info(f"  {var}: {val[:4]}*** (length: {len(val)})")
-            else: logger.warning(f"  {var}: NOT FOUND")
-    else: logger.warning("No .env file found. Using system environment variables.")
-    logger.info("=== ENVIRONMENT LOADED SUCCESSFULLY ===")
+            if val:
+                if log_value:
+                    loaded_vars_summary.append(f"{var}: {val[:4]}***")
+                else:
+                    loaded_vars_summary.append(f"{var}: Present")
+            else:
+                env_warnings.append(f"{var}: NOT FOUND")
+                logger.warning(f"  Environment Variable Missing: {var}") # Keep individual warnings for missing criticals
+        
+        if loaded_vars_summary:
+            env_summary["Loaded Critical Vars"] = ", ".join(loaded_vars_summary)
+    else: 
+        logger.warning("Environment: No .env file found. Using system environment variables only.")
+        env_warnings.append("No .env file loaded")
+
+    # Consolidated summary log
+    if env_summary:
+        logger.info("Environment Status", extra={"summary_data": env_summary})
+    elif not env_loaded and not env_warnings: # No .env, no criticals checked or all were somehow found in sys env without .env (unlikely for all)
+        logger.info("Environment: Initialized using system variables (no .env found, critical var status not detailed here).")
+
+    # Explicitly log the end of environment setup for the formatter to catch
+    logger.info("=== ENVIRONMENT LOADED SUCCESSFULLY ===") 
     return env_loaded
 
 load_environment()
@@ -126,7 +132,6 @@ try:
             numeric_level = getattr(logging, APP_SETTINGS.LOG_LEVEL.upper(), None)
             if isinstance(numeric_level, int):
                 root_logger.setLevel(numeric_level)
-                console_handler.setFormatter(ColoredFormatter(use_colors=True)) # Reapply formatter
                 logger.info(f"Root logger level set to {APP_SETTINGS.LOG_LEVEL} from configuration.")
             else:
                 logger.warning(f"Invalid LOG_LEVEL '{APP_SETTINGS.LOG_LEVEL}' in config. Using previous level.")
@@ -175,6 +180,10 @@ try:
 except Exception as e:
     logger.error(f"Error during admin user setup: {e}", exc_info=True)
     logger.warning("Continuing with startup despite admin user setup error.")
+
+async def on_bot_startup(app: web.Application):
+    """Called when the bot server has started successfully"""
+    logger.info("=== BOT SERVER RUNNING ===")  # Matches the end trigger in formatter
 
 async def on_bot_shutdown(app: web.Application):
     logger.info("Bot application shutting down. Cleaning up resources...")
@@ -305,6 +314,7 @@ async def healthz(req: web.BaseRequest) -> web.Response:
 SERVER_APP = web.Application()
 SERVER_APP.router.add_post(APP_SETTINGS.settings.bot_api_messages_endpoint or "/api/messages", messages) # Use validated config via .settings
 SERVER_APP.router.add_get(APP_SETTINGS.settings.bot_api_healthcheck_endpoint or "/healthz", healthz) # Use validated config via .settings
+SERVER_APP.on_startup.append(on_bot_startup)
 SERVER_APP.on_cleanup.append(on_bot_shutdown)
 
 if __name__ == "__main__":
@@ -318,8 +328,10 @@ if __name__ == "__main__":
             logger.warning(f"APP_SETTINGS.port not found or invalid ('{APP_SETTINGS.settings.port}'). Using default port {port_to_use}.")
         
         logger.info(f"Bot server starting on http://0.0.0.0:{port_to_use}") # Matches SECTIONS["STARTUP"]["start"]
+        
+        # Start the server
         web.run_app(SERVER_APP, host="0.0.0.0", port=port_to_use) # Changed from localhost to 0.0.0.0
-        logger.info("=== Bot server running ===") # Manual end marker
+        
     except Exception as error:
         logger.critical(f"Failed to start bot server: {error}", exc_info=True)
         sys.exit(1)

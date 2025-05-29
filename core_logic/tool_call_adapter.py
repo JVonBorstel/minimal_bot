@@ -396,7 +396,7 @@ class ToolCallAdapter:
                 target_metrics.selection_records = []
                 
             target_metrics.selection_records.append(selection_record) # Append first
-            max_records = self.config.settings.get("tool_adapter_max_selection_records", self.MAX_SELECTION_RECORDS)
+            max_records = getattr(self.config.settings, "tool_adapter_max_selection_records", self.MAX_SELECTION_RECORDS)
             if len(target_metrics.selection_records) > max_records:
                 target_metrics.selection_records = target_metrics.selection_records[-max_records:]
             

@@ -314,7 +314,13 @@ def _ensure_dict_schema_has_type(
     """
     if 'type' not in schema_dict:
         if any(k in schema_dict for k in ['anyOf', 'oneOf', 'allOf']):
-            schema_dict['type'] = 'object'  # Placeholder for complex union/intersection types
+            # If anyOf, oneOf, or allOf is present, these keywords define the type.
+            # Do not automatically set type to 'object'.
+            # The Gemini SDK expects the 'type' field to be absent or correctly derived
+            # from the contents of anyOf/oneOf/allOf if they represent simple type choices.
+            # If they represent choices between complex objects, then the individual schemas
+            # within anyOf/oneOf/allOf should themselves have type: 'object' and properties.
+            pass # Let the structure be defined by anyOf/oneOf/allOf
         elif 'properties' in schema_dict: # If it has properties, it's an object
             schema_dict['type'] = 'object'
         elif 'items' in schema_dict: # If it has items, it's an array
@@ -407,10 +413,12 @@ class ParameterProperty(BaseModel):
     More complex JSON schema features like 'oneOf', 'allOf', 'format'
     are not explicitly detailed here but could be part of 'additional_details'.
     """
-    type: str = Field(
+    type: Optional[str] = Field(
+        None,
         description=(
             "The JSON schema type of the parameter (e.g., 'string', "
-            "'integer', 'boolean', 'array', 'object')."
+            "'integer', 'boolean', 'array', 'object'). "
+            "Optional when anyOf/oneOf/allOf define the type structure."
         )
     )
     description: Optional[str] = Field(

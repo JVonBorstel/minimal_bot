@@ -1,145 +1,401 @@
+"""
+Log Data Sanitizer
+==================
+
+This module provides intelligent data sanitization for logging that:
+- Protects sensitive user data and credentials
+- Preserves debugging utility through selective masking
+- Supports configurable sanitization rules
+- Maintains data structure for analysis while removing sensitive content
+"""
+
 import re
+import hashlib
+import json
+from typing import Any, Dict, List, Optional, Union, Callable
+from dataclasses import dataclass
+from enum import Enum
 
-# Precompile regex patterns for common sensitive data
-# Note: These patterns are examples and may need to be adjusted for specific use cases.
-# Order matters: more specific patterns should come before more general ones.
-SENSITIVE_PATTERNS = {
-    # API Keys (various common prefixes)
-    "api_key_generic_prefix": re.compile(r"(sk-|glp_|AIza|ATAT|rk_live_)[a-zA-Z0-9\-_]{20,}"),
-    "api_key_exact_length": re.compile(r"\b[a-zA-Z0-9\-_]{32,64}\b"), # General long alphanumeric strings that might be keys
+
+class SensitivityLevel(Enum):
+    """Different levels of data sensitivity"""
+    PUBLIC = "public"           # Can be logged freely
+    INTERNAL = "internal"       # Can be logged in internal systems
+    CONFIDENTIAL = "confidential"  # Should be hashed or masked
+    SECRET = "secret"          # Should never be logged
+
+
+@dataclass
+class SanitizationRule:
+    """Configuration for how to sanitize specific data types"""
+    pattern: str  # Regex pattern to match
+    replacement: str  # How to replace matched content
+    sensitivity: SensitivityLevel
+    preserve_length: bool = False  # Whether to preserve original length
+    preserve_structure: bool = False  # Whether to preserve data structure
+
+
+class DataSanitizer:
+    """Intelligent data sanitizer for log entries"""
     
-    # Authorization Headers
-    "auth_bearer_token": re.compile(r"(Bearer\s+)[a-zA-Z0-9\-_\.=]+"),
-    "auth_basic_token": re.compile(r"(Basic\s+)[a-zA-Z0-9\+/=]+"),
-    "auth_header_full": re.compile(r"(['\"]Authorization['\"]\s*:\s*['\"])(Bearer|Basic)\s+[a-zA-Z0-9\-_\.=]+(['\"])"),
-
-    # Common Secrets / Passwords (Keywords often appear in keys or contexts)
-    # These are harder to detect generically without context, focus on values if possible
-    "password_like_value": re.compile(r"(['\"]?(?:password|secret|token|key|passwd|pwd)['\"]?\s*[:=]\s*['\"])[^\s'\"]+(['\"]?)", re.IGNORECASE),
-
-    # Email addresses
-    "email_address": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b"),
+    def __init__(self):
+        self.rules = self._load_default_rules()
+        self.hash_salt = "bot_logging_salt_2024"  # In production, use config
+        
+    def _load_default_rules(self) -> List[SanitizationRule]:
+        """Load default sanitization rules"""
+        return [
+            # API Keys and Tokens
+            SanitizationRule(
+                pattern=r'\b[A-Za-z0-9]{20,}\b',  # Generic API key pattern
+                replacement='[API_KEY:{}]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=False
+            ),
+            
+            # Email addresses
+            SanitizationRule(
+                pattern=r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+                replacement='[EMAIL:{}]',
+                sensitivity=SensitivityLevel.CONFIDENTIAL,
+                preserve_length=False
+            ),
+            
+            # IP Addresses
+            SanitizationRule(
+                pattern=r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
+                replacement='[IP:{}]',
+                sensitivity=SensitivityLevel.INTERNAL,
+                preserve_length=False
+            ),
+            
+            # Phone numbers (US format)
+            SanitizationRule(
+                pattern=r'\b\d{3}-\d{3}-\d{4}\b',
+                replacement='[PHONE:***-***-****]',
+                sensitivity=SensitivityLevel.CONFIDENTIAL,
+                preserve_length=True
+            ),
+            
+            # Credit card numbers
+            SanitizationRule(
+                pattern=r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b',
+                replacement='[CARD:****-****-****-****]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=True
+            ),
+            
+            # Social Security Numbers
+            SanitizationRule(
+                pattern=r'\b\d{3}-\d{2}-\d{4}\b',
+                replacement='[SSN:***-**-****]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=True
+            ),
+            
+            # GitHub tokens
+            SanitizationRule(
+                pattern=r'ghp_[A-Za-z0-9]{36}',
+                replacement='[GITHUB_TOKEN:ghp_***]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=False
+            ),
+            
+            # JWT tokens
+            SanitizationRule(
+                pattern=r'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*',
+                replacement='[JWT_TOKEN:eyJ***]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=False
+            ),
+            
+            # Passwords in common formats
+            SanitizationRule(
+                pattern=r'(?i)(password|passwd|pwd)[\s]*[=:]\s*["\']?([^"\'\s]+)["\']?',
+                replacement=r'\1=[PASSWORD:***]',
+                sensitivity=SensitivityLevel.SECRET,
+                preserve_length=False
+            ),
+        ]
     
-    # Common PII examples (very basic, real PII detection is complex)
-    "ssn_like": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "credit_card_like": re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"), # Basic, doesn't validate Luhn
-}
-
-MASK_REPLACEMENT = "***MASKED***"
-
-def _sanitize_string(text: str) -> str:
-    """Applies all predefined regex patterns to a string for sanitization."""
-    if not isinstance(text, str):
-        return text # Return non-string types as is
-
-    sanitized_text = text
-    for key_name, pattern in SENSITIVE_PATTERNS.items():
-        if "auth_bearer_token" in key_name or "auth_basic_token" in key_name : # Handle group replacement for bearer/basic
-             sanitized_text = pattern.sub(f"\\1{MASK_REPLACEMENT}", sanitized_text)
-        elif "auth_header_full" in key_name:
-             sanitized_text = pattern.sub(f"\\1\\2 {MASK_REPLACEMENT}\\3", sanitized_text)
-        elif "password_like_value" in key_name:
-             sanitized_text = pattern.sub(f"\\1{MASK_REPLACEMENT}\\2", sanitized_text)
+    def sanitize_data(self, data: Any, max_sensitivity: SensitivityLevel = SensitivityLevel.INTERNAL) -> Any:
+        """
+        Sanitize data based on sensitivity level
+        
+        Args:
+            data: The data to sanitize
+            max_sensitivity: Maximum sensitivity level to preserve
+            
+        Returns:
+            Sanitized data
+        """
+        if isinstance(data, str):
+            return self._sanitize_string(data, max_sensitivity)
+        elif isinstance(data, dict):
+            return self._sanitize_dict(data, max_sensitivity)
+        elif isinstance(data, list):
+            return self._sanitize_list(data, max_sensitivity)
         else:
-            sanitized_text = pattern.sub(MASK_REPLACEMENT, sanitized_text)
-    return sanitized_text
+            return data
+    
+    def _sanitize_string(self, text: str, max_sensitivity: SensitivityLevel) -> str:
+        """Sanitize a string value"""
+        if not text:
+            return text
+            
+        result = text
+        
+        for rule in self.rules:
+            if self._should_apply_rule(rule, max_sensitivity):
+                if '{}' in rule.replacement:
+                    # Hash-based replacement
+                    def replace_with_hash(match):
+                        original = match.group(0)
+                        hash_value = self._generate_hash(original)[:8]
+                        return rule.replacement.format(hash_value)
+                    result = re.sub(rule.pattern, replace_with_hash, result)
+                else:
+                    # Direct replacement
+                    result = re.sub(rule.pattern, rule.replacement, result)
+                    
+        return result
+    
+    def _sanitize_dict(self, data: Dict[str, Any], max_sensitivity: SensitivityLevel) -> Dict[str, Any]:
+        """Sanitize a dictionary"""
+        sanitized = {}
+        
+        for key, value in data.items():
+            # Check if key itself is sensitive
+            sanitized_key = self._sanitize_key(key, max_sensitivity)
+            sanitized_value = self.sanitize_data(value, max_sensitivity)
+            sanitized[sanitized_key] = sanitized_value
+            
+        return sanitized
+    
+    def _sanitize_list(self, data: List[Any], max_sensitivity: SensitivityLevel) -> List[Any]:
+        """Sanitize a list"""
+        return [self.sanitize_data(item, max_sensitivity) for item in data]
+    
+    def _sanitize_key(self, key: str, max_sensitivity: SensitivityLevel) -> str:
+        """Sanitize dictionary keys that might be sensitive"""
+        sensitive_key_patterns = [
+            'password', 'passwd', 'pwd', 'secret', 'key', 'token',
+            'credential', 'auth', 'api_key', 'private'
+        ]
+        
+        key_lower = key.lower()
+        if any(pattern in key_lower for pattern in sensitive_key_patterns):
+            if max_sensitivity.value not in [SensitivityLevel.CONFIDENTIAL.value, SensitivityLevel.SECRET.value]:
+                return f"[SENSITIVE_KEY:{self._generate_hash(key)[:6]}]"
+                
+        return key
+    
+    def _should_apply_rule(self, rule: SanitizationRule, max_sensitivity: SensitivityLevel) -> bool:
+        """Determine if a sanitization rule should be applied"""
+        sensitivity_order = {
+            SensitivityLevel.PUBLIC: 0,
+            SensitivityLevel.INTERNAL: 1,
+            SensitivityLevel.CONFIDENTIAL: 2,
+            SensitivityLevel.SECRET: 3
+        }
+        
+        return sensitivity_order[rule.sensitivity] > sensitivity_order[max_sensitivity]
+    
+    def _generate_hash(self, data: str) -> str:
+        """Generate a consistent hash for sensitive data"""
+        return hashlib.sha256(f"{data}{self.hash_salt}".encode()).hexdigest()
+    
+    def add_custom_rule(self, rule: SanitizationRule):
+        """Add a custom sanitization rule"""
+        self.rules.append(rule)
+    
+    def get_sanitization_summary(self, original_data: Any, sanitized_data: Any) -> Dict[str, Any]:
+        """Generate a summary of what was sanitized"""
+        return {
+            'original_size': len(str(original_data)),
+            'sanitized_size': len(str(sanitized_data)),
+            'reduction_ratio': 1 - (len(str(sanitized_data)) / len(str(original_data))),
+            'types_sanitized': self._detect_sanitized_types(str(sanitized_data))
+        }
+    
+    def _detect_sanitized_types(self, sanitized_text: str) -> List[str]:
+        """Detect what types of data were sanitized based on replacement patterns"""
+        types = []
+        patterns = {
+            'API_KEY': r'\[API_KEY:',
+            'EMAIL': r'\[EMAIL:',
+            'IP': r'\[IP:',
+            'PHONE': r'\[PHONE:',
+            'CARD': r'\[CARD:',
+            'SSN': r'\[SSN:',
+            'GITHUB_TOKEN': r'\[GITHUB_TOKEN:',
+            'JWT_TOKEN': r'\[JWT_TOKEN:',
+            'PASSWORD': r'\[PASSWORD:'
+        }
+        
+        for type_name, pattern in patterns.items():
+            if re.search(pattern, sanitized_text):
+                types.append(type_name)
+                
+        return types
 
-def sanitize_data(data):
-    """
-    Recursively sanitizes a dictionary, list, or string by masking sensitive patterns.
-    For dictionaries, it sanitizes values. Keys are not sanitized by this function,
-    as key-based sanitization is handled by JSONFormatter's LOG_SENSITIVE_FIELDS.
-    """
-    if isinstance(data, dict):
-        return {k: sanitize_data(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [sanitize_data(item) for item in data]
-    elif isinstance(data, str):
-        return _sanitize_string(data)
+
+class ContextAwareSanitizer(DataSanitizer):
+    """Enhanced sanitizer that considers context for smarter sanitization"""
+    
+    def __init__(self):
+        super().__init__()
+        self.context_rules = self._load_context_rules()
+    
+    def _load_context_rules(self) -> Dict[str, List[SanitizationRule]]:
+        """Load context-specific sanitization rules"""
+        return {
+            'llm_prompt': [
+                # Be more conservative with LLM prompts
+                SanitizationRule(
+                    pattern=r'\b\w+@\w+\.\w+\b',  # Any email-like pattern
+                    replacement='[EMAIL_REDACTED]',
+                    sensitivity=SensitivityLevel.INTERNAL
+                )
+            ],
+            'error_message': [
+                # Preserve file paths but sanitize user data
+                SanitizationRule(
+                    pattern=r'/users/([^/\s]+)',
+                    replacement='/users/[USER]',
+                    sensitivity=SensitivityLevel.INTERNAL
+                )
+            ],
+            'tool_response': [
+                # Be more permissive for debugging tool responses
+                SanitizationRule(
+                    pattern=r'(user_id|id):\s*(\d+)',
+                    replacement=r'\1: [USER_ID:\2]',
+                    sensitivity=SensitivityLevel.CONFIDENTIAL
+                )
+            ]
+        }
+    
+    def sanitize_with_context(self, data: Any, context: str, 
+                            max_sensitivity: SensitivityLevel = SensitivityLevel.INTERNAL) -> Any:
+        """Sanitize data with context-aware rules"""
+        # Apply base sanitization first
+        sanitized = self.sanitize_data(data, max_sensitivity)
+        
+        # Apply context-specific rules
+        if context in self.context_rules:
+            for rule in self.context_rules[context]:
+                if self._should_apply_rule(rule, max_sensitivity):
+                    if isinstance(sanitized, str):
+                        sanitized = re.sub(rule.pattern, rule.replacement, sanitized)
+                    # Add handling for dict/list if needed
+        
+        return sanitized
+
+
+class DebugModeSanitizer(DataSanitizer):
+    """Sanitizer with debug mode that logs what it's sanitizing"""
+    
+    def __init__(self, debug_logger=None):
+        super().__init__()
+        self.debug_logger = debug_logger
+        self.sanitization_log = []
+    
+    def sanitize_data(self, data: Any, max_sensitivity: SensitivityLevel = SensitivityLevel.INTERNAL) -> Any:
+        """Sanitize data and log debug information"""
+        original_str = str(data)
+        sanitized = super().sanitize_data(data, max_sensitivity)
+        sanitized_str = str(sanitized)
+        
+        if original_str != sanitized_str:
+            log_entry = {
+                'timestamp': time.time(),
+                'original_length': len(original_str),
+                'sanitized_length': len(sanitized_str),
+                'patterns_matched': self._find_matched_patterns(original_str),
+                'sensitivity_level': max_sensitivity.value
+            }
+            
+            self.sanitization_log.append(log_entry)
+            
+            if self.debug_logger:
+                self.debug_logger.debug("Data sanitized", **log_entry)
+        
+        return sanitized
+    
+    def _find_matched_patterns(self, text: str) -> List[str]:
+        """Find which patterns matched in the text"""
+        matched = []
+        for rule in self.rules:
+            if re.search(rule.pattern, text):
+                matched.append(rule.pattern)
+        return matched
+    
+    def get_sanitization_stats(self) -> Dict[str, Any]:
+        """Get statistics about sanitization activity"""
+        if not self.sanitization_log:
+            return {'total_sanitizations': 0}
+            
+        return {
+            'total_sanitizations': len(self.sanitization_log),
+            'avg_size_reduction': sum(
+                1 - (entry['sanitized_length'] / entry['original_length'])
+                for entry in self.sanitization_log
+            ) / len(self.sanitization_log),
+            'common_patterns': self._get_common_patterns(),
+            'recent_activity': self.sanitization_log[-10:]  # Last 10 entries
+        }
+    
+    def _get_common_patterns(self) -> Dict[str, int]:
+        """Get the most commonly matched sanitization patterns"""
+        pattern_counts = {}
+        for entry in self.sanitization_log:
+            for pattern in entry['patterns_matched']:
+                pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+        return dict(sorted(pattern_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+
+
+# Convenience functions
+def sanitize_data(data: Any, max_sensitivity: SensitivityLevel = SensitivityLevel.INTERNAL) -> Any:
+    """Quick function to sanitize data"""
+    sanitizer = DataSanitizer()
+    return sanitizer.sanitize_data(data, max_sensitivity)
+
+def sanitize_for_logging(data: Any, context: str = None) -> Any:
+    """Sanitize data specifically for logging purposes"""
+    if context:
+        sanitizer = ContextAwareSanitizer()
+        return sanitizer.sanitize_with_context(data, context, SensitivityLevel.INTERNAL)
     else:
-        # Non-dict, non-list, non-string types are returned as is
-        return data
+        return sanitize_data(data, SensitivityLevel.INTERNAL)
 
-if __name__ == '__main__':
-    # Test cases
-    test_data_dict = {
-        "username": "john_doe",
-        "api_key": "sk-abc123xyz789qwertyuiopasdfghjklzxcvbnm",
-        "credentials": {
-            "password": "mysecretpassword123",
-            "old_tokens": ["glp_oldTokenDataHere", "anotherTokenValue"],
-            "auth_header": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-        },
-        "description": "User info with email: test@example.com and secondary key rk_live_thisIsARealKey12345678901234567890",
-        "random_id_short": "abc123xyz789",
-        "random_id_long": "abc123xyz789qwertyuiopasdfghjklzxcvbnm_long_one_test",
-        "config_setting": "{\"Authorization\": \"Basic dXNlcjpwYXNzd29yZA==\"}",
-        "notes": "SSN: 123-45-6789, CC: 1234-5678-9012-3456. Call AIzaSyChOtmDRY6sIMq0fD0fBDX_ABCDEFGH",
-        "plain_text_api_key": "AIzaSyChOtmDRY6sIMq0fD0fBDX_thisisatestkey"
+def sanitize_for_external(data: Any) -> Any:
+    """Sanitize data for external consumption (highest security)"""
+    return sanitize_data(data, SensitivityLevel.PUBLIC)
+
+
+# Test utilities
+def test_sanitizer():
+    """Test the sanitizer with sample data"""
+    sanitizer = DataSanitizer()
+    
+    test_data = {
+        'user_email': 'john.doe@example.com',
+        'api_key': 'sk-1234567890abcdef1234567890abcdef',
+        'phone': '555-123-4567',
+        'message': 'Please reset password for user@test.com',
+        'config': {
+            'database_url': 'postgresql://user:pass@localhost:5432/db',
+            'github_token': 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+        }
     }
-
-    test_data_string_direct_key = "This string contains an API key: sk-anotherKeyForDirectTest1234567890 and an email support@domain.com."
     
-    test_data_list = [
-        "item1",
-        {"sensitive_in_list": "sk-listKeyHereValue1234567890", "email_in_list": "contact@example.org"},
-        "item3",
-        "Authorization: Bearer some_jwt_token_here.payload.signature"
-    ]
-
-    print("Original Dictionary:")
-    print(json.dumps(test_data_dict, indent=2))
-    sanitized_dict = sanitize_data(test_data_dict)
-    print("\nSanitized Dictionary:")
-    print(json.dumps(sanitized_dict, indent=2))
-
-    print("\nOriginal String:")
-    print(test_data_string_direct_key)
-    sanitized_string = sanitize_data(test_data_string_direct_key)
-    print("\nSanitized String:")
-    print(sanitized_string)
+    sanitized = sanitizer.sanitize_data(test_data)
+    summary = sanitizer.get_sanitization_summary(test_data, sanitized)
     
-    print("\nOriginal List:")
-    print(json.dumps(test_data_list, indent=2))
-    sanitized_list = sanitize_data(test_data_list)
-    print("\nSanitized List:")
-    print(json.dumps(sanitized_list, indent=2))
+    print("Original:", json.dumps(test_data, indent=2))
+    print("\nSanitized:", json.dumps(sanitized, indent=2))
+    print("\nSummary:", json.dumps(summary, indent=2))
 
-    # Test for auth header within a string that looks like a JSON dumped string
-    json_string_with_auth = '{"headers": {"Authorization": "Bearer verylongtokenstringgoeshere"}}'
-    print("\nOriginal JSON String with Auth:")
-    print(json_string_with_auth)
-    sanitized_json_string_with_auth = sanitize_data(json_string_with_auth)
-    print("\nSanitized JSON String with Auth:")
-    print(sanitized_json_string_with_auth)
-
-    # Test specific password pattern
-    pass_string = 'The password is: "supersecret"'
-    print(f"\nOriginal: {pass_string}")
-    print(f"Sanitized: {sanitize_data(pass_string)}")
-
-    pass_string_json = '{"user_password": "password123"}'
-    print(f"\nOriginal: {pass_string_json}")
-    print(f"Sanitized: {sanitize_data(pass_string_json)}")
-    
-    # Test case: String that is a key itself but short
-    short_key_string = "Authorization" 
-    print(f"\nOriginal: {short_key_string}")
-    print(f"Sanitized: {sanitize_data(short_key_string)}") # Should not be masked
-
-    # Test case: String that contains a key pattern but is not a value associated with a typical key name
-    random_text_with_key_pattern = "A random string sk-abcdef12345678901234567890 found in text."
-    print(f"\nOriginal: {random_text_with_key_pattern}")
-    print(f"Sanitized: {sanitize_data(random_text_with_key_pattern)}")
-
-    # Test case from real example
-    auth_header_example = {"Authorization": "Bearer ghp_X..."}
-    print("\nOriginal Auth Header Example:")
-    print(json.dumps(auth_header_example, indent=2))
-    sanitized_auth_header = sanitize_data(auth_header_example)
-    print("\nSanitized Auth Header Example:")
-    print(json.dumps(sanitized_auth_header, indent=2))
-    
-    auth_header_in_string = "some request with header 'Authorization': 'Bearer ghp_Y...' in it"
-    print(f"\nOriginal: {auth_header_in_string}")
-    print(f"Sanitized: {sanitize_data(auth_header_in_string)}") 
+if __name__ == "__main__":
+    test_sanitizer() 

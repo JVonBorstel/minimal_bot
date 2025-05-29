@@ -77,9 +77,10 @@ try:
     import google.ai.generativelanguage as actual_glm
     glm = actual_glm
     SDK_AVAILABLE = True
-    print("[OK] PRODUCTION FIX: Real Google AI SDK loaded in history_utils")
+    # Moved to proper logging after logger is available
 except ImportError as e:
-    print(f"[WARNING] Google AI SDK not available in history_utils, using mocks: {e}")
+    # Will be logged properly after logger is initialized
+    _sdk_import_error = str(e)
     # SDK_AVAILABLE remains False, glm remains _MockGlm instance
 
 # --- Start: Robust import of logging_config --- 
@@ -113,6 +114,13 @@ except ModuleNotFoundError as e:
 
 # Logging Configuration
 log = get_logger("core_logic.history_utils")
+
+# Log SDK status now that logger is available
+if SDK_AVAILABLE:
+    log.debug("Google AI SDK loaded successfully in history_utils")
+else:
+    error_msg = globals().get('_sdk_import_error', 'Unknown import error')
+    log.debug(f"Using mock Google AI SDK in history_utils (real SDK not available): {error_msg}")
 
 # Project-specific constants
 from .constants import (
@@ -383,21 +391,14 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
         if sdk_parts:
             # Role is already validated by AppState.Message model to be one of "user", "model", "function", "system"
             role_for_sdk = msg_from_history.role
-            if role_for_sdk == "system": # Map system to model for some LLMs if system role isn't directly supported for history
-                # This depends on the specific LLM and how system prompts are handled.
-                # If llm_interface.py uses a dedicated system_instruction param, system messages in history might be ignored or cause errors.
-                # For Gemini, 'system' is not a valid role in history. Map to 'model' or filter out.
-                # Let's assume for now we map system messages with text to 'model' for context.
-                # If the system message was only for internal logging, it might have is_internal=True
-                if msg_from_history.is_internal:
-                    note = f"Skipping internal system message at index {msg_index} for LLM history."
-                    log.debug(note, extra={"event_type": "skip_internal_system_message", "details": {"message_index": msg_index}})
-                    preparation_notes.append(note)
-                    continue # Skip this system message
-                role_for_sdk = "model" # Or filter out: continue
-                note = f"Mapping system message at index {msg_index} to role 'model' for LLM history."
-                log.debug(note, extra={"event_type": "map_system_to_model", "details": {"message_index": msg_index}})
+            if role_for_sdk == "system": 
+                # For Gemini, system prompts are handled via system_instruction parameter in model initialization
+                # System messages in conversation history are unnecessary and should be skipped
+                # This prevents inefficient token usage and potential confusion
+                note = f"Skipping system message at index {msg_index} - system prompts handled via model system_instruction parameter."
+                log.debug(note, extra={"event_type": "skip_system_message_for_efficiency", "details": {"message_index": msg_index}})
                 preparation_notes.append(note)
+                continue
 
             formatted_messages.append(glm.Content(parts=sdk_parts, role=role_for_sdk))
         else:

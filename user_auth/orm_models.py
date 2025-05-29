@@ -18,6 +18,7 @@ class UserProfile(Base):
     last_active_timestamp = Column(Integer, nullable=False)
     profile_data = Column(Text, nullable=True) # Storing as Text, can be loaded as JSON in application logic
     profile_version = Column(Integer, nullable=False, default=1)
+    tool_adapter_metrics = Column(Text, nullable=True) # JSON string for tool selection metrics
 
     # Defining indexes explicitly (though some are created by index=True above)
     # This is more for visibility and consistency with the existing DDL if specific index names are desired.

@@ -30,6 +30,13 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
+
+# NOTE: Alembic manages tables derived from SQLAlchemy Base (e.g., UserAuthBase.metadata).
+# The 'bot_state' table, used by Bot Framework's SQLiteStorage, is managed
+# separately by the SQLiteStorage._ensure_table() method in bot_core/my_bot.py.
+# This dual schema management approach ensures:
+# - User authentication tables are versioned via Alembic migrations
+# - Bot conversation state tables are managed by the Bot Framework's storage system
 target_metadata = UserAuthBase.metadata # Use UserAuthBase.metadata
 
 # other values from the config, defined by the needs of env.py,

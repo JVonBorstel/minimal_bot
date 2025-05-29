@@ -6,6 +6,7 @@ import json
 # import logging # Replaced by custom logging
 import asyncio
 import time # Added for timing
+import os # Added for environment variable checks
 from typing import AsyncIterable, Dict, Any, Optional, TypeAlias, Union, List
 import uuid
 
@@ -24,7 +25,7 @@ from .constants import (
 # Updated to use the new history preparation function
 from .history_utils import prepare_messages_for_llm_from_appstate, HistoryResetRequiredError
 from .llm_interactions import (
-    _perform_llm_interaction, _prepare_tool_definitions
+    _perform_llm_interaction, _prepare_tool_definitions, _update_session_stats
 )
 from .tool_processing import _execute_tool_calls  # This is async
 
@@ -46,6 +47,23 @@ from bot_core.message_handler import SafeTextPart
 
 log = get_logger("core_logic.agent_loop")
 
+# Optional enhanced functionality - only imported when enabled
+_enhanced_controller_class = None
+_response_composer_class = None
+
+def _load_enhanced_components():
+    """Lazy load enhanced components only when needed."""
+    global _enhanced_controller_class, _response_composer_class
+    if _enhanced_controller_class is None:
+        try:
+            from .enhanced_agent_controller import EnhancedAgentController
+            from .intelligent_response_composer import IntelligentResponseComposer
+            _enhanced_controller_class = EnhancedAgentController
+            _response_composer_class = IntelligentResponseComposer
+            log.info("Enhanced agent components loaded")
+        except ImportError as e:
+            log.warning(f"Enhanced components not available: {e}")
+    return _enhanced_controller_class, _response_composer_class
 
 # Helper function to run an async generator and return all its items
 def run_async_generator(async_gen: AsyncIterable[Any]) -> List[Any]:
@@ -136,6 +154,32 @@ def _determine_status_message(
                 f"{STATUS_THINKING} Processing information "
                 f"(Cycle {cycle_num + 1})"
             )
+
+def _is_enhanced_mode_enabled() -> bool:
+    """Check if enhanced agent mode is enabled via environment variable or config."""
+    return os.getenv("ENABLE_ENHANCED_AGENT", "false").lower() in ["true", "1", "yes"]
+
+def _should_use_enhanced_planning(user_message: str) -> bool:
+    """Simple check for complex requests that benefit from enhanced planning."""
+    if not user_message:
+        return False
+    
+    user_lower = user_message.lower()
+    
+    # Look for complexity indicators
+    complex_patterns = [
+        "step by step", "detailed analysis", "comprehensive", "full analysis",
+        "analyze my", "create report", "compare multiple", "workflow",
+        "plan my", "strategy for", "approach to"
+    ]
+    
+    # Look for multi-tool patterns
+    multi_tool_patterns = ["jira and github", "tickets and repos", "multiple tools"]
+    
+    has_complexity = any(pattern in user_lower for pattern in complex_patterns)
+    has_multi_tool = any(pattern in user_lower for pattern in multi_tool_patterns)
+    
+    return has_complexity or has_multi_tool
 
 # Copied from migration/chat_logic.py.new (lines 2558-2940)
 # and imports updated
@@ -240,6 +284,56 @@ async def start_streaming_response(
             latest_user_message = app_state.messages[-1].text.lower() if app_state.messages[-1].text else ""
             help_keywords = ["help", "what can you do", "show commands", "available tools"]
             is_help_command = any(keyword in latest_user_message for keyword in help_keywords)
+
+        # Optional Enhanced Agent Mode - check if enabled and should use enhanced planning
+        if _is_enhanced_mode_enabled() and not is_help_command and _should_use_enhanced_planning(latest_user_message):
+            log.info("Using enhanced agent mode for complex request")
+            try:
+                enhanced_controller_class, response_composer_class = _load_enhanced_components()
+                if enhanced_controller_class and response_composer_class:
+                    yield {'type': 'status', 'content': '🧠 **Enhanced Mode** - Analyzing complex request with intelligent planning...'}
+                    
+                    # Create enhanced components
+                    enhanced_controller = enhanced_controller_class(tool_executor, config)
+                    response_composer = response_composer_class(config)
+                    
+                    # Use enhanced processing
+                    async for event in enhanced_controller.process_request_with_feedback(
+                        latest_user_message, app_state
+                    ):
+                        # Transform events with intelligent response composer
+                        try:
+                            if event.get('type') == 'planning':
+                                yield {'type': 'status', 'content': '🧠 **Intelligent Analysis** - ' + event.get('content', '')}
+                            elif event.get('type') == 'step_start':
+                                content = event.get('content', {})
+                                progress_bar = response_composer._generate_progress_bar(
+                                    content.get('step_number', 1) - 1, content.get('total_steps', 1)
+                                )
+                                yield {
+                                    'type': 'status', 
+                                    'content': f"⚡ **Step {content.get('step_number', 1)}/{content.get('total_steps', 1)}**: {content.get('description', 'Processing...')}\n{progress_bar}"
+                                }
+                            elif event.get('type') == 'step_completed':
+                                content = event.get('content', {})
+                                yield {
+                                    'type': 'status', 
+                                    'content': f"✅ **Completed**: {content.get('description', 'Step finished')}"
+                                }
+                            else:
+                                yield event
+                        except Exception as transform_error:
+                            log.warning(f"Event transformation failed: {transform_error}")
+                            yield event
+                    
+                    app_state.last_interaction_status = "COMPLETED_ENHANCED"
+                    yield {'type': 'completed', 'content': {'status': app_state.last_interaction_status}}
+                    return
+                    
+            except Exception as e:
+                log.error(f"Enhanced mode failed, falling back to standard mode: {e}")
+                yield {'type': 'status', 'content': '⚠️ Enhanced mode unavailable, using standard processing...'}
+                # Continue with standard processing below
 
         # Check for multi-tool workflow patterns
         from .workflow_orchestrator import detect_workflow_intent, WorkflowOrchestrator
@@ -569,7 +663,13 @@ async def start_streaming_response(
                 }
             )
             
-            current_llm_call_id = start_llm_call()
+            current_llm_call_start_time = time.monotonic() # Record start time for this specific LLM call
+            model_name_for_logging = getattr(config, 'GEMINI_MODEL', 'unknown_model')
+            log.info(f"Attempting to start LLM call with model: {model_name_for_logging}", extra={"event_type": "pre_llm_call_log", "details": {"model_name": model_name_for_logging}})
+            if model_name_for_logging == 'unknown_model':
+                log.error("CRITICAL: GEMINI_MODEL not found in config object for start_llm_call.", extra={"event_type": "config_model_missing_error"})
+                # Decide on fallback or raise critical error
+            current_llm_call_id = start_llm_call(model_name_for_logging)
             try:
                 llm_stream_iter_general = _perform_llm_interaction(
                     current_llm_history=current_llm_history,
@@ -604,6 +704,19 @@ async def start_streaming_response(
                             llm_stream_error_general = True
             finally:
                 clear_llm_call_id()
+            
+            # === Add call to _update_session_stats here ===
+            if llm_debug_info_general:
+                log.debug(
+                    "Attempting to update session stats with LLM debug info.",
+                    extra={"event_type": "update_session_stats_attempt", "details": llm_debug_info_general}
+                )
+                _update_session_stats(
+                    app_state=app_state,
+                    llm_debug_info=llm_debug_info_general,
+                    start_time=current_llm_call_start_time # Pass the recorded start time
+                )
+            # === End of addition ===
             
             current_llm_text_output = "".join(llm_text_parts_general)
             accumulated_llm_text_this_turn += current_llm_text_output
@@ -997,8 +1110,29 @@ async def start_streaming_response(
     finally:
         end_time = time.perf_counter()
         duration_ms = int((end_time - start_time) * 1000)
+        # Update total_agent_turn_ms, make it cumulative
         if hasattr(app_state, 'session_stats') and hasattr(app_state.session_stats, 'total_agent_turn_ms'):
-            app_state.session_stats.total_agent_turn_ms = duration_ms
+            # Ensure session_stats.total_agent_turn_ms is an int, default to 0 if not (should be handled by Pydantic default)
+            current_total_turn_ms = getattr(app_state.session_stats, 'total_agent_turn_ms', 0)
+            if not isinstance(current_total_turn_ms, int):
+                log.warning(f"session_stats.total_agent_turn_ms was not an int ({type(current_total_turn_ms)}), resetting to 0 before adding current turn duration.")
+                current_total_turn_ms = 0
+            app_state.session_stats.total_agent_turn_ms = current_total_turn_ms + duration_ms
+        
+        # Ensure llm_debug_info_general from the last successful/attempted LLM call is used for stats
+        # This handles cases where the loop might break after LLM interaction but before normal stat update point
+        # Note: This might be redundant if the primary update point always executes, but serves as a fallback.
+        # If we are in finally, it implies the primary update point might have been skipped.
+        # However, the primary update point IS NOW PLACED BEFORE THE LLM ERROR HANDLING BREAKS.
+        # So, this specific fallback MIGHT not be strictly necessary if the edit above is correctly placed.
+        # Let's comment it out for now to avoid potential double counting from the primary placement.
+        # log.debug("Ensuring LLM stats update in finally block if not already done.", extra={"event_type": "final_llm_stats_update_check"})
+        # _update_session_stats(
+        # app_state=app_state,
+        # llm_debug_info=llm_debug_info_general,
+        # start_time=current_llm_call_start_time # Needs this to be in scope
+        # )
+
         app_state.is_streaming = False
         log.info(
             "Streaming response finished.",

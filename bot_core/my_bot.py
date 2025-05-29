@@ -35,6 +35,8 @@ from botbuilder.schema import (  # type: ignore
     CardAction,
     ActionTypes,  # Added SuggestedActions, CardAction, ActionTypes
     CardImage,
+    HeroCard, # Add HeroCard import
+    Attachment,
 )
 
 # Assuming config.py is in the root or a path accessible via PYTHONPATH
@@ -166,6 +168,12 @@ class SQLiteStorage:
     Robust SQLite-backed storage for Bot Framework state.
     Stores state as JSON blobs keyed by (namespace, id).
     Includes connection pooling and enhanced error handling.
+    
+    NOTE: This class manages the 'bot_state' table in the SQLite database.
+    Other tables in the same database (e.g., 'user_auth_profiles') are managed
+    by Alembic migrations. This dual schema management approach ensures:
+    - Bot conversation state is handled by Bot Framework's storage system
+    - User authentication tables are versioned via Alembic migrations
     """
     # SQLite error codes that might be transient and benefit from retries
     TRANSIENT_ERROR_CODES = {
@@ -1007,16 +1015,19 @@ class MyBot(ActivityHandler):
                 and member.id != turn_context.activity.recipient.id
                 and member.name.lower() != "bot" # Add check for bot name
             ):
-                await turn_context.send_activity(
-                    MessageFactory.text(
-                        f"Hello {member.name}! Welcome to the Augie Bot "
-                        f"(Bot Framework Edition v.{app_state.version})."
-                    )
+                # Send a warm, professional welcome message
+                welcome_message = (
+                    f"👋 **Welcome, {member.name}!**\n\n"
+                    f"I'm **Aughie**, your AI development assistant. I'm here to help streamline your development workflow with:\n\n"
+                    f"🔧 **GitHub & Git operations**\n"
+                    f"📋 **Jira & project management**\n" 
+                    f"🔍 **Code search & documentation**\n"
+                    f"🌐 **Research & problem solving**\n\n"
+                    f"Let's get started! 🚀"
                 )
-                await turn_context.send_activity(
-                    "I'm your AI assistant for development and "
-                    "operations tasks. How can I help you today?"
-                )
+                
+                await turn_context.send_activity(MessageFactory.text(welcome_message))
+                
                 # Optionally add system message to app_state about welcome
                 app_state.add_message(
                     role="system",
@@ -1025,7 +1036,9 @@ class MyBot(ActivityHandler):
                 logger.info("Welcomed new member", extra={"event_type": "member_added", "details": {"member_name": member.name, "activity_id": turn_context.activity.id}})
 
     async def on_message_activity(self, turn_context: TurnContext):
-        current_turn_id = start_new_turn()
+        activity_user_id = turn_context.activity.from_property.id if turn_context.activity.from_property else "unknown_user"
+        activity_session_id = turn_context.activity.conversation.id if turn_context.activity.conversation else None
+        current_turn_id = start_new_turn(user_id_param=activity_user_id, session_id_val=activity_session_id)
         logger_msg_activity = get_logger("bot_core.my_bot.on_message_activity") # Use namespaced logger
         
         logger_msg_activity.info(
@@ -1078,6 +1091,66 @@ class MyBot(ActivityHandler):
                     
                     onboarding_was_skipped_this_turn = False
 
+                    # --- FIRST: Handle Pending Onboarding Decision (Button Clicks) ---
+                    # Ensure meta_flags exists or initialize it
+                    if not hasattr(app_state, 'meta_flags') or app_state.meta_flags is None:
+                        app_state.meta_flags = {}
+                    
+                    if app_state.meta_flags.get("pending_onboarding_decision"):
+                        logger_msg_activity.info(f"Processing pending onboarding decision for user {user_profile.user_id}. User response: '{user_text_lower}'", extra={"event_type": "onboarding_decision_processing"})
+                        app_state.meta_flags["pending_onboarding_decision"] = False # Clear flag immediately
+
+                        if user_text_lower == "start onboarding":
+                            logger_msg_activity.info(f"User {user_profile.user_id} opted IN to onboarding.", extra={"event_type": "onboarding_opt_in"})
+                            # Start the onboarding workflow
+                            workflow = onboarding_handler.start_workflow() # This updates app_state with the active workflow
+                            
+                            first_question_response = onboarding_handler._format_question_response(ONBOARDING_QUESTIONS[0], workflow)
+                            first_question_activity = MessageFactory.text(
+                                f"**{first_question_response['progress']}** {first_question_response['message']}"
+                            )
+                            if first_question_response.get("suggested_actions"):
+                                first_question_activity.suggested_actions = SuggestedActions(actions=first_question_response["suggested_actions"])
+                            
+                            await turn_context.send_activity(first_question_activity)
+                            
+                            # Update profile with onboarding status
+                            if hasattr(user_profile, 'profile_data') and isinstance(user_profile.profile_data, dict):
+                                user_profile.profile_data["onboarding_status"] = "started"
+                                user_profile.profile_data["onboarding_started_at"] = datetime.utcnow().isoformat()
+                            from user_auth import db_manager # Ensure import
+                            db_manager.save_user_profile(user_profile.model_dump())
+                            
+                            logger_msg_activity.info(f"Started onboarding workflow {workflow.workflow_id} for user {user_profile.user_id} after opt-in.", extra={"event_type": "onboarding_workflow_started_opt_in", "workflow_id": workflow.workflow_id})
+                            return # Onboarding question sent, end turn
+                        
+                        elif user_text_lower == "skip onboarding for now":
+                            logger_msg_activity.info(f"User {user_profile.user_id} opted OUT of onboarding for now.", extra={"event_type": "onboarding_opt_out"})
+                            await turn_context.send_activity(MessageFactory.text("Alright, we can skip the detailed setup for now. You can always ask me to set up your preferences later by typing `onboard me` or `setup preferences`.\n\nHow can I help you today?"))
+                            # Update profile to reflect skipped onboarding
+                            if hasattr(user_profile, 'profile_data') and isinstance(user_profile.profile_data, dict):
+                                user_profile.profile_data["onboarding_status"] = "skipped_temporarily"
+                                user_profile.profile_data["onboarding_skipped_at"] = datetime.utcnow().isoformat()
+                            from user_auth import db_manager # Ensure import
+                            db_manager.save_user_profile(user_profile.model_dump())
+                            return # End turn after handling skip
+                        elif user_text_lower in ["later", "maybe later", "not now", "no", "nah", "nope", "skip", "no thanks", "not interested", "nah i dont wanna", "i dont want to", "hey i dont want to"]:
+                            # Handle common rejection phrases
+                            logger_msg_activity.info(f"User {user_profile.user_id} rejected onboarding with: '{user_text_lower}'.", extra={"event_type": "onboarding_rejected_common_phrase"})
+                            await turn_context.send_activity(MessageFactory.text("No problem! We can skip the setup for now. You can always ask me to set up your preferences later by typing `onboard me` or `setup preferences`.\n\nHow can I help you today?"))
+                            # Update profile to reflect skipped onboarding
+                            if hasattr(user_profile, 'profile_data') and isinstance(user_profile.profile_data, dict):
+                                user_profile.profile_data["onboarding_status"] = "declined"
+                                user_profile.profile_data["onboarding_declined_at"] = datetime.utcnow().isoformat()
+                            from user_auth import db_manager # Ensure import
+                            db_manager.save_user_profile(user_profile.model_dump())
+                            return # End turn after handling rejection
+                        else:
+                            # User sent something else while decision was pending - clear the flag and continue processing
+                            logger_msg_activity.info(f"User {user_profile.user_id} sent other message while onboarding decision pending: '{user_text_lower}'. Clearing flag and proceeding.", extra={"event_type": "onboarding_decision_other_message"})
+                            # Don't return, continue with normal message processing
+                    
+                    # --- SECOND: Handle Active Onboarding Workflow ---
                     if current_active_onboarding_workflow and user_text_lower == "help":
                         help_message = (
                             "You're currently in the onboarding process. You can:\\n"
@@ -1260,7 +1333,12 @@ class MyBot(ActivityHandler):
                             if result.get("completed"):
                                 # Message is now a card payload
                                 completion_card_payload = result["message"]
-                                completion_activity = MessageFactory.attachment(completion_card_payload)
+                                # Create an Attachment object from the payload
+                                attachment = Attachment(
+                                    content_type=completion_card_payload["contentType"],
+                                    content=completion_card_payload["content"]
+                                )
+                                completion_activity = MessageFactory.attachment(attachment)
                                 await turn_context.send_activity(completion_activity)
                                 
                                 # Profile is already saved by the incremental save block above
@@ -1271,6 +1349,8 @@ class MyBot(ActivityHandler):
                                     await turn_context.send_activity(MessageFactory.text(admin_message))
                                 logger_msg_activity.info(f"Completed onboarding for user {user_profile.user_id}",
                                                          extra={"event_type": "onboarding_completed", "suggested_role": result.get("suggested_role")})
+                                # Send the transition message after all onboarding completion messages
+                                await turn_context.send_activity(MessageFactory.text("Now that we've got that sorted, how can I help you next?"))
                             else: 
                                 # Send next question, potentially with suggested actions
                                 next_question_text = f"**{result['progress']}** {result['message']}"
@@ -1285,36 +1365,39 @@ class MyBot(ActivityHandler):
                                                           extra={"event_type": "onboarding_question_sent", "progress": result.get("progress")})
                                 return
                         elif OnboardingWorkflow.should_trigger_onboarding(user_profile, app_state):
-                            logger_msg_activity.info(f"Triggering onboarding workflow for new user {user_profile.user_id}", extra={"event_type": "onboarding_workflow_triggered"})
-                            workflow = onboarding_handler.start_workflow()
+                            logger_msg_activity.info(f"User {user_profile.user_id} is eligible for onboarding. Prompting user.", extra={"event_type": "onboarding_prompt_initiated"})
                             
-                            # --- Create Welcome Hero Card ---
-                            welcome_card = CardFactory.hero_card(
-                                title="👋 Welcome to Augie!",
-                                text=f"Hi {user_profile.display_name}! I'm your AI assistant. A quick setup will help me tailor my responses and tools for you. You can type 'skip onboarding' at any time to bypass this.",
-                                images=[CardImage(url=self.app_config.settings.get("AUGIE_LOGO_URL", "https://raw.githubusercontent.com/Aughie/augie_images/main/logos_various_formats/logo_circle_transparent_256.png"))], # Optional: Add a logo if configured
-                                # No buttons on the welcome card to prevent misinterpretation of the button click as an answer to the first question.
-                                # The first question will be sent immediately after this card.
+                            # --- Create Onboarding Prompt Hero Card ---
+                            prompt_hero_card = HeroCard(
+                                title="🤖 Welcome to Aughie!",
+                                subtitle="Your AI Development Assistant",
+                                text=f"Hi {user_profile.display_name}! 👋\n\nI'm here to help with your development tasks. To provide the best assistance, I'd love to learn a bit about you and your preferences.\n\n**Quick Setup** (~2 minutes)\n• Personalize my responses\n• Configure your tools\n• Set communication style",
+                                images=[CardImage(url=getattr(self.app_config.settings, "AUGIE_LOGO_URL", "https://raw.githubusercontent.com/Aughie/augie_images/main/logos_various_formats/logo_circle_transparent_256.png"))],
+                                buttons=[
+                                    CardAction(
+                                        type=ActionTypes.im_back, 
+                                        title="🚀 Let's Get Started!", 
+                                        value="start onboarding"
+                                    ),
+                                    CardAction(
+                                        type=ActionTypes.im_back, 
+                                        title="⏭️ Maybe Later", 
+                                        value="skip onboarding for now"
+                                    )
+                                ]
                             )
-                            welcome_activity = MessageFactory.attachment(welcome_card)
-                            await turn_context.send_activity(welcome_activity)
+                            prompt_activity = MessageFactory.attachment(CardFactory.hero_card(prompt_hero_card))
+                            await turn_context.send_activity(prompt_activity)
                             
-                            # --- Send First Actual Question (as a separate activity) ---
-                            first_question_response = onboarding_handler._format_question_response(ONBOARDING_QUESTIONS[0], workflow)
+                            # Ensure meta_flags is initialized if it's not
+                            if not hasattr(app_state, 'meta_flags') or app_state.meta_flags is None:
+                                app_state.meta_flags = {}
+                            app_state.meta_flags["pending_onboarding_decision"] = True
                             
-                            first_question_activity = MessageFactory.text(
-                                f"**{first_question_response['progress']}** {first_question_response['message']}"
-                            )
-                            if first_question_response.get("suggested_actions"):
-                                first_question_activity.suggested_actions = SuggestedActions(actions=first_question_response["suggested_actions"])
-                            
-                            await turn_context.send_activity(first_question_activity)
-                            
-                            from user_auth import db_manager
-                            profile_dict = user_profile.model_dump()
-                            db_manager.save_user_profile(profile_dict)
-                            logger_msg_activity.info(f"Started onboarding workflow {workflow.workflow_id} for user {user_profile.user_id}", extra={"event_type": "onboarding_workflow_started", "workflow_id": workflow.workflow_id})
-                            return 
+                            # Save state with the pending flag
+                            # No need to save user_profile here as it's saved earlier or by other flows
+                            logger_msg_activity.info(f"Sent onboarding prompt to user {user_profile.user_id}. Awaiting decision.", extra={"event_type": "onboarding_prompt_sent"})
+                            return # Wait for user's response
 
                 except Exception as e_onboarding: # Correctly scoped except for onboarding block
                     logger_msg_activity.error(f"Error in ONBOARDING LOGIC block: {e_onboarding}", exc_info=True, extra={"event_type": "onboarding_block_error"})

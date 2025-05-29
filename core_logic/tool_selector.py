@@ -851,8 +851,31 @@ class ToolSelector:
 
         # --- BEGIN PERMISSION FILTERING ---
         if not app_state or not app_state.current_user:
-            log.warning("Cannot filter tools by permission: AppState or current_user is missing. Returning no tools.")
-            return []
+            log.warning("Cannot filter tools by permission: AppState or current_user is missing. Using permission-free fallback.")
+            # When user context is missing, provide basic tools that don't require specific permissions
+            permission_free_tools = []
+            for tool_def in relevant_tools:
+                tool_name = tool_def.get("name", "unknown_tool")
+                metadata = tool_def.get("metadata", {})
+                required_permission_name_str = metadata.get("required_permission_name")
+                
+                # If no permission is required, include the tool
+                if not required_permission_name_str:
+                    permission_free_tools.append(tool_def)
+                    if self.debug_logging:
+                        log.debug(f"Including permission-free tool: {tool_name}")
+                # Include basic utility tools that should always be available
+                elif tool_name in ["help", "list_dir", "read_file", "health_check"]:
+                    permission_free_tools.append(tool_def)
+                    if self.debug_logging:
+                        log.debug(f"Including basic utility tool: {tool_name}")
+            
+            if permission_free_tools:
+                log.info(f"Returning {len(permission_free_tools)} permission-free tools due to missing user context.")
+                return permission_free_tools
+            else:
+                log.warning("No permission-free tools available. Returning empty list.")
+                return []
 
         final_permitted_tools: List[Dict[str, Any]] = []
         for tool_def in relevant_tools:

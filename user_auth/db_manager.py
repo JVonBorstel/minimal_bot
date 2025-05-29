@@ -92,6 +92,14 @@ def get_user_profile_by_id(user_id: str) -> Optional[Dict[str, Any]]:
                         profile_dict['profile_data'] = json.loads(profile_dict['profile_data'])
                     except json.JSONDecodeError:
                         logger.warning(f"Could not decode profile_data JSON for user {user_id} from ORM. Returning as raw string.")
+                
+                # Deserialize tool_adapter_metrics if it exists and is a string
+                if profile_dict.get('tool_adapter_metrics') and isinstance(profile_dict['tool_adapter_metrics'], str):
+                    try:
+                        profile_dict['tool_adapter_metrics'] = json.loads(profile_dict['tool_adapter_metrics'])
+                    except json.JSONDecodeError:
+                        logger.warning(f"Could not decode tool_adapter_metrics JSON for user {user_id} from ORM. Returning as raw string.")
+                
                 return profile_dict
             return None
     except sqlalchemy_exc.SQLAlchemyError as e:
@@ -118,8 +126,10 @@ def save_user_profile(user_profile_dict: Dict[str, Any]) -> bool:
             user_id = user_profile_dict['user_id']
             user_profile = session.get(UserProfile, user_id)
 
-            # Prepare data, especially serializing profile_data if it's a dict
+            # Prepare data, especially serializing profile_data and tool_adapter_metrics if they're dicts
             data_to_save = user_profile_dict.copy()
+            
+            # Serialize profile_data if it's a dict
             if 'profile_data' in data_to_save and isinstance(data_to_save['profile_data'], dict):
                 try:
                     data_to_save['profile_data'] = json.dumps(data_to_save['profile_data'])
@@ -127,7 +137,16 @@ def save_user_profile(user_profile_dict: Dict[str, Any]) -> bool:
                     logger.error(f"Could not serialize profile_data for user {user_id}. Saving as None/not updating.")
                     # Decide handling: either remove or save as is if it was already a string/None
                     if isinstance(user_profile_dict['profile_data'], dict): # only pop if it was the problematic dict
-                        data_to_save.pop('profile_data', None) 
+                        data_to_save.pop('profile_data', None)
+            
+            # Serialize tool_adapter_metrics if it's a dict
+            if 'tool_adapter_metrics' in data_to_save and isinstance(data_to_save['tool_adapter_metrics'], dict):
+                try:
+                    data_to_save['tool_adapter_metrics'] = json.dumps(data_to_save['tool_adapter_metrics'])
+                except TypeError:
+                    logger.error(f"Could not serialize tool_adapter_metrics for user {user_id}. Saving as None/not updating.")
+                    if isinstance(user_profile_dict['tool_adapter_metrics'], dict):
+                        data_to_save.pop('tool_adapter_metrics', None)
             
             current_time = int(time.time())
 
@@ -180,11 +199,20 @@ def get_all_user_profiles() -> List[Dict[str, Any]]:
                     column.name: getattr(user_profile, column.name) 
                     for column in user_profile.__table__.columns
                 }
+                # Deserialize profile_data if it exists and is a string
                 if profile_dict.get('profile_data') and isinstance(profile_dict['profile_data'], str):
                     try:
                         profile_dict['profile_data'] = json.loads(profile_dict['profile_data'])
                     except json.JSONDecodeError:
                         logger.warning(f"Could not decode profile_data JSON for user {user_profile.user_id} in get_all_user_profiles. Returning as raw string.")
+                
+                # Deserialize tool_adapter_metrics if it exists and is a string
+                if profile_dict.get('tool_adapter_metrics') and isinstance(profile_dict['tool_adapter_metrics'], str):
+                    try:
+                        profile_dict['tool_adapter_metrics'] = json.loads(profile_dict['tool_adapter_metrics'])
+                    except json.JSONDecodeError:
+                        logger.warning(f"Could not decode tool_adapter_metrics JSON for user {user_profile.user_id} in get_all_user_profiles. Returning as raw string.")
+                
                 profiles_list.append(profile_dict)
         return profiles_list
     except sqlalchemy_exc.SQLAlchemyError as e:

@@ -257,6 +257,27 @@ class WorkflowOrchestrator:
                     app_state=app_state
                 )
                 
+                # Update session statistics for workflow tool execution
+                if app_state and hasattr(app_state, 'session_stats') and app_state.session_stats:
+                    # Determine success for stats
+                    is_success = self._determine_success(step_result)
+                    
+                    # Extract execution time if available
+                    execution_time_ms = 0
+                    if isinstance(step_result, dict):
+                        execution_time_ms = step_result.get("execution_time_ms", 0)
+                    
+                    # Update session stats
+                    app_state.session_stats.tool_calls = getattr(app_state.session_stats, 'tool_calls', 0) + 1
+                    app_state.session_stats.tool_execution_ms = getattr(app_state.session_stats, 'tool_execution_ms', 0) + execution_time_ms
+                    
+                    if not is_success:
+                        app_state.session_stats.failed_tool_calls = getattr(app_state.session_stats, 'failed_tool_calls', 0) + 1
+                    
+                    # Update tool usage tracking if available
+                    if hasattr(app_state, 'update_tool_usage') and callable(app_state.update_tool_usage):
+                        app_state.update_tool_usage(step.tool_name, execution_time_ms, is_success)
+                
                 results[step.step_id] = {
                     "tool_name": step.tool_name,
                     "parameters": injected_params,
@@ -567,8 +588,17 @@ class WorkflowOrchestrator:
     def _determine_success(self, result: Any) -> bool:
         """Determine if a tool execution was successful."""
         if isinstance(result, dict):
-            return result.get("status", "").upper() in ["SUCCESS", "OK"]
-        return result is not None
+            # Handle explicit error status
+            if result.get("status", "").upper() in ["ERROR", "FAILED", "FAILURE"]:
+                return False
+            # Handle successful status
+            if result.get("status", "").upper() in ["SUCCESS", "OK", "COMPLETED"]:
+                return True
+            # Handle configuration errors (these are failures but we want to track them specially)
+            if result.get("error_type") == "ToolNotConfigured":
+                return False
+        # If result is None or empty, consider it a failure
+        return result is not None and result != ""
     
     async def _synthesize_workflow_results(
         self, 
@@ -666,14 +696,36 @@ class WorkflowOrchestrator:
         """Synthesize GitHub repositories list."""
         repos_result = results.get("get_repos", {}).get("result", {})
         
-        if not repos_result:
-            return "❌ Could not retrieve repository data."
+        # Check if the tool execution failed
+        step_success = results.get("get_repos", {}).get("success", False)
+        if not step_success or not repos_result:
+            # Check if this is a configuration error
+            if isinstance(repos_result, dict) and repos_result.get("error_type") == "ToolNotConfigured":
+                error_message = repos_result.get("message", "GitHub tools aren't configured")
+                actionable_advice = repos_result.get("actionable_advice", "")
+                fallback_suggestions = repos_result.get("fallback_suggestions", [])
+                
+                synthesis = []
+                synthesis.append("⚠️ **GitHub Repository Access Issue**")
+                synthesis.append(f"{error_message}")
+                
+                if actionable_advice:
+                    synthesis.append(f"\n💡 **How to fix this:** {actionable_advice}")
+                
+                if fallback_suggestions:
+                    synthesis.append(f"\n🔄 **What you can do instead:**")
+                    for i, suggestion in enumerate(fallback_suggestions, 1):
+                        synthesis.append(f"  {i}. {suggestion}")
+                
+                return "\n".join(synthesis)
+            else:
+                return "❌ Could not retrieve repository data. There may be a connection issue or the service is temporarily unavailable."
         
         # Extract meaningful data
         repos = repos_result.get("data", []) if isinstance(repos_result, dict) else repos_result
         
         if not repos:
-            return "📁 No repositories found."
+            return "📁 No repositories found in your GitHub account."
         
         synthesis = []
         synthesis.append(f"📁 **Your GitHub Repositories** ({len(repos)} found)")
@@ -691,14 +743,36 @@ class WorkflowOrchestrator:
         """Synthesize Jira tickets list."""
         jira_result = results.get("get_jira_tickets", {}).get("result", {})
         
-        if not jira_result:
-            return "❌ Could not retrieve Jira ticket data."
+        # Check if the tool execution failed
+        step_success = results.get("get_jira_tickets", {}).get("success", False)
+        if not step_success or not jira_result:
+            # Check if this is a configuration error
+            if isinstance(jira_result, dict) and jira_result.get("error_type") == "ToolNotConfigured":
+                error_message = jira_result.get("message", "Jira tools aren't configured")
+                actionable_advice = jira_result.get("actionable_advice", "")
+                fallback_suggestions = jira_result.get("fallback_suggestions", [])
+                
+                synthesis = []
+                synthesis.append("⚠️ **Jira Ticket Access Issue**")
+                synthesis.append(f"{error_message}")
+                
+                if actionable_advice:
+                    synthesis.append(f"\n💡 **How to fix this:** {actionable_advice}")
+                
+                if fallback_suggestions:
+                    synthesis.append(f"\n🔄 **What you can do instead:**")
+                    for i, suggestion in enumerate(fallback_suggestions, 1):
+                        synthesis.append(f"  {i}. {suggestion}")
+                
+                return "\n".join(synthesis)
+            else:
+                return "❌ Could not retrieve Jira ticket data. There may be a connection issue or the service is temporarily unavailable."
         
         # Extract meaningful data  
         tickets = jira_result.get("data", []) if isinstance(jira_result, dict) else jira_result
         
         if not tickets:
-            return "🎫 No Jira tickets found."
+            return "🎫 No Jira tickets found for your account."
         
         synthesis = []
         synthesis.append(f"🎫 **Your Jira Tickets** ({len(tickets)} found)")
@@ -746,6 +820,30 @@ class WorkflowOrchestrator:
         synthesis = []
         synthesis.append("💻 **Code Search Results**")
         
+        # Check if the tool execution failed
+        step_success = results.get("search_codebase", {}).get("success", False)
+        if not step_success or not code_result:
+            # Check if this is a configuration error
+            if isinstance(code_result, dict) and code_result.get("error_type") == "ToolNotConfigured":
+                error_message = code_result.get("message", "Code search tools aren't configured")
+                actionable_advice = code_result.get("actionable_advice", "")
+                fallback_suggestions = code_result.get("fallback_suggestions", [])
+                
+                synthesis.append(f"⚠️ {error_message}")
+                
+                if actionable_advice:
+                    synthesis.append(f"\n💡 **How to fix this:** {actionable_advice}")
+                
+                if fallback_suggestions:
+                    synthesis.append(f"\n🔄 **What you can do instead:**")
+                    for i, suggestion in enumerate(fallback_suggestions, 1):
+                        synthesis.append(f"  {i}. {suggestion}")
+                
+                return "\n".join(synthesis)
+            else:
+                synthesis.append("❌ Code search failed. There may be a connection issue or the service is temporarily unavailable.")
+                return "\n".join(synthesis)
+        
         if code_result:
             # Handle the actual search result format from Greptile
             if isinstance(code_result, dict) and "data" in code_result:
@@ -754,7 +852,7 @@ class WorkflowOrchestrator:
             else:
                 synthesis.append("🔍 Search completed")
         else:
-            synthesis.append("❌ No code search results found")
+            synthesis.append("🔍 No code search results found")
         
         return "\n".join(synthesis)
     
@@ -764,6 +862,30 @@ class WorkflowOrchestrator:
         
         synthesis = []
         synthesis.append("🌐 **Web Search Results**")
+        
+        # Check if the tool execution failed
+        step_success = results.get("web_search", {}).get("success", False)
+        if not step_success or not search_result:
+            # Check if this is a configuration error
+            if isinstance(search_result, dict) and search_result.get("error_type") == "ToolNotConfigured":
+                error_message = search_result.get("message", "Web search tools aren't configured")
+                actionable_advice = search_result.get("actionable_advice", "")
+                fallback_suggestions = search_result.get("fallback_suggestions", [])
+                
+                synthesis.append(f"⚠️ {error_message}")
+                
+                if actionable_advice:
+                    synthesis.append(f"\n💡 **How to fix this:** {actionable_advice}")
+                
+                if fallback_suggestions:
+                    synthesis.append(f"\n🔄 **What you can do instead:**")
+                    for i, suggestion in enumerate(fallback_suggestions, 1):
+                        synthesis.append(f"  {i}. {suggestion}")
+                
+                return "\n".join(synthesis)
+            else:
+                synthesis.append("❌ Web search failed. There may be a connection issue or the service is temporarily unavailable.")
+                return "\n".join(synthesis)
         
         if search_result:
             # Check if this is a successful result with data
@@ -795,7 +917,7 @@ class WorkflowOrchestrator:
             else:
                 synthesis.append("🔍 Search completed.")
         else:
-            synthesis.append("❌ No search results available.")
+            synthesis.append("🔍 No search results available.")
         
         return "\n".join(synthesis)
     
@@ -866,14 +988,50 @@ class WorkflowOrchestrator:
             if result.get("success", False)
         ]
         
+        failed_steps = [
+            step_id for step_id, result in results.items() 
+            if not result.get("success", False)
+        ]
+        
         synthesis = []
         synthesis.append(f"🔄 **Workflow Complete**")
-        synthesis.append(f"✅ Successfully executed {len(successful_steps)} steps: {', '.join(successful_steps)}")
         
-        for step_id, step_result in results.items():
-            if step_result.get("success"):
+        if successful_steps:
+            synthesis.append(f"✅ Successfully executed {len(successful_steps)} steps: {', '.join(successful_steps)}")
+            
+            for step_id in successful_steps:
+                step_result = results[step_id]
                 tool_name = step_result.get("tool_name", "Unknown")
                 synthesis.append(f"  📌 {step_id} ({tool_name}): Success")
+        
+        if failed_steps:
+            synthesis.append(f"\n⚠️ **Issues encountered in {len(failed_steps)} steps:**")
+            
+            for step_id in failed_steps:
+                step_result = results[step_id].get("result", {})
+                
+                # Check if this is a configuration error
+                if isinstance(step_result, dict) and step_result.get("error_type") == "ToolNotConfigured":
+                    error_message = step_result.get("message", "Tool not configured")
+                    actionable_advice = step_result.get("actionable_advice", "")
+                    fallback_suggestions = step_result.get("fallback_suggestions", [])
+                    
+                    synthesis.append(f"  🔧 **{step_id}**: {error_message}")
+                    
+                    if actionable_advice:
+                        synthesis.append(f"     💡 **Fix:** {actionable_advice}")
+                    
+                    if fallback_suggestions:
+                        synthesis.append(f"     🔄 **Alternatives:**")
+                        for suggestion in fallback_suggestions[:2]:  # Limit to 2 suggestions to keep it concise
+                            synthesis.append(f"       • {suggestion}")
+                else:
+                    # Generic error handling
+                    tool_name = results[step_id].get("tool_name", "Unknown")
+                    synthesis.append(f"  ❌ {step_id} ({tool_name}): Failed")
+        
+        if not successful_steps and not failed_steps:
+            synthesis.append("ℹ️ No steps were executed.")
         
         return "\n".join(synthesis)
 
