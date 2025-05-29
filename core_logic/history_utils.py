@@ -10,7 +10,7 @@ from importlib import import_module
 import uuid
 
 # Renamed 'state' to 'state_models' as per project structure and migration plan
-from state_models import AppState, ScratchpadEntry, Message  # Corrected import
+from state_models import AppState, ScratchpadEntry, Message, WorkflowContext  # Corrected import
 from bot_core.message_handler import SafeTextPart
 # Removed: from llm_interface import glm  # For glm.glm.Content, glm.glm.Part etc.
 
@@ -337,73 +337,142 @@ def _optimize_message_history(
 def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_history_items: Optional[int] = None) -> Tuple[List[RuntimeContentType], List[str]]:
     """
     Prepares messages from AppState for LLM consumption using the new Message structure.
-    
-    Args:
-        app_state: The AppState containing messages to prepare
-        config_max_history_items: Optional maximum number of history items to include
-        
-    Returns:
-        Tuple of (formatted messages for LLM, list of preparation notes/errors)
+    Integrates history optimization and active workflow context.
     """
     preparation_notes = []
     formatted_messages: List[RuntimeContentType] = []
     
-    # Use provided max_history_items or default to 30
-    max_items = config_max_history_items if config_max_history_items is not None else 30
-    
-    # Use AppState's internal messages directly. If optimization is needed *before* this conversion,
-    # it should be a separate step that modifies app_state.messages or produces a temporary list.
-    # For now, this function will take the last `max_items` from app_state.messages.
-    history_to_convert = app_state.messages[-max_items:]
+    max_items = config_max_history_items if config_max_history_items is not None else (app_state.config.LLM_MAX_HISTORY_ITEMS if hasattr(app_state, 'config') and app_state.config and hasattr(app_state.config, 'LLM_MAX_HISTORY_ITEMS') else 30)
 
-    if len(app_state.messages) > max_items:
-        note = f"History truncated to last {max_items} messages from original {len(app_state.messages)}."
-        log.debug(note, extra={"event_type": "history_truncation", "details": {"original_count": len(app_state.messages), "truncated_count": len(history_to_convert)}})
+    # Convert Pydantic Message objects to dictionaries for _optimize_message_history
+    # as it currently expects List[Dict[str, Any]]
+    messages_as_dicts: List[Dict[str, Any]] = []
+    for msg_obj in app_state.messages:
+        try:
+            # Ensure timestamp is a float (Unix timestamp) if _optimize_message_history expects that for sorting
+            # The Message model uses datetime, so convert it.
+            msg_dict = msg_obj.model_dump(mode='json') # mode='json' handles datetime to ISO string
+            # If _optimize_message_history needs float timestamp, convert msg_dict['timestamp']
+            # For now, assuming _optimize_message_history can handle ISO string or can be adapted.
+            # Let's ensure timestamp is present for sorting in _optimize_message_history
+            if 'timestamp' not in msg_dict or msg_dict['timestamp'] is None:
+                msg_dict['timestamp'] = datetime.utcnow().isoformat() + "Z" # Fallback timestamp
+            messages_as_dicts.append(msg_dict)
+        except Exception as e_dump:
+            log.warning(f"Error converting Message object to dict for history prep: {e_dump}. Skipping message.")
+            preparation_notes.append(f"Skipped one message due to conversion error: {e_dump}")
+
+    # 1. Optimize history if too long
+    if len(messages_as_dicts) > max_items:
+        log.info(f"History length ({len(messages_as_dicts)}) exceeds max_items ({max_items}). Optimizing...")
+        # Pass app_state.scratchpad if _optimize_message_history is to use it
+        scratchpad_for_opt: Optional[List[ScratchpadEntry]] = app_state.scratchpad if hasattr(app_state, 'scratchpad') else None
+        history_to_convert_dicts = _optimize_message_history(messages_as_dicts, max_items, scratchpad_for_opt)
+        note = f"History optimized from {len(messages_as_dicts)} to {len(history_to_convert_dicts)} messages."
+        log.debug(note, extra={"event_type": "history_optimization_applied"})
+        preparation_notes.append(note)
+    else:
+        history_to_convert_dicts = messages_as_dicts
+
+    # 2. Inject active workflow context as a system message (if any)
+    active_workflow_ctx: Optional[WorkflowContext] = None
+    if hasattr(app_state, 'get_active_workflow_by_type'): # Check if method exists
+        # Attempt to get a primary active workflow, e.g., onboarding or the first one found
+        primary_wf_type = app_state.get_primary_active_workflow_name()
+        if primary_wf_type:
+            active_workflow_ctx = app_state.get_active_workflow_by_type(primary_wf_type)
+
+    if active_workflow_ctx:
+        workflow_info_text = (
+            f"System Context: You are currently assisting the user within the '{active_workflow_ctx.workflow_type}' workflow. "
+            f"Current stage is '{active_workflow_ctx.current_stage}'. "
+            f"Relevant data for this stage might include: {str(active_workflow_ctx.data)[:200]}..."
+        )
+        # Create a system message part for this context.
+        # This will be converted to glm.Content later. For now, represent as dict.
+        workflow_context_msg_dict = {
+            "role": "system", # Or "user" if preferred to make it seem like a user reminder to the assistant
+            "parts": [{"type": "text", "text": workflow_info_text}],
+            "timestamp": datetime.utcnow().isoformat() + "Z", # Ensure it's placed correctly in history if sorted
+            "is_internal": True, # Mark as internal so it might be treated specially or not shown to user
+            "message_type": "workflow_context_injection"
+        }
+        # Insert it before the last user message, or at the end if no user messages.
+        # For simplicity, adding to the list that will be converted. Sorting later might be needed if not added at right place.
+        # This simple append might not be ideal if strict ordering is needed before the last user message.
+        # A better approach might be to find the last user message and insert before it.
+        # For now, adding it to the list to be converted. _optimize_message_history runs before this.
+        # Let's convert this to a Message object and add it to a temporary list to be merged and sorted.
+        temp_context_messages = [Message.model_validate(workflow_context_msg_dict)]
+        
+        # Re-convert to dicts for consistent processing before glm.Content conversion
+        history_to_convert_dicts.extend([m.model_dump(mode='json') for m in temp_context_messages])
+        # Re-sort if timestamps matter for this injected context
+        history_to_convert_dicts.sort(key=lambda m: m.get('timestamp', datetime.min.isoformat()))
+        # Re-apply max_items limit if injection pushed it over, prioritizing newest
+        if len(history_to_convert_dicts) > max_items:
+            history_to_convert_dicts = history_to_convert_dicts[-max_items:]
+
+        note = f"Injected active workflow context ('{active_workflow_ctx.workflow_type}' - '{active_workflow_ctx.current_stage}') into LLM history."
+        log.debug(note, extra={"event_type": "workflow_context_injected"})
         preparation_notes.append(note)
 
-    for msg_index, msg_from_history in enumerate(history_to_convert):
-        # msg_from_history is AppState.Message Pydantic model
+    # 3. Convert to glm.Content (or SDK dicts)
+    for msg_index, msg_dict_from_history in enumerate(history_to_convert_dicts):
         sdk_parts = []
-        for part_data in msg_from_history.parts: # msg_from_history.parts is List[MessagePart]
-            if part_data.type == "text":
-                # part_data is TextPart
-                sdk_parts.append(glm.Part(text=part_data.text))
-            elif part_data.type == "function_call":
-                # part_data is FunctionCallPart
-                # part_data.function_call is FunctionCallData(name=..., args=...)
+        # Ensure parts is a list of dicts, as MessagePart is a Union of Pydantic models
+        parts_list = msg_dict_from_history.get('parts', [])
+        if not isinstance(parts_list, list):
+            log.warning(f"Message at index {msg_index} has parts of type {type(parts_list)}, expected list. Converting text.")
+            # Fallback: try to get text from raw_text or content if parts is not a list
+            raw_text_content = msg_dict_from_history.get('raw_text', msg_dict_from_history.get('content'))
+            if isinstance(raw_text_content, str):
+                parts_list = [{'type': 'text', 'text': raw_text_content}]
+            else:
+                parts_list = [] # Cannot determine parts
+        
+        for part_data_dict in parts_list: # part_data_dict should be a dict here
+            part_type = part_data_dict.get('type')
+            if part_type == "text":
+                sdk_parts.append(glm.Part(text=part_data_dict.get('text', '')))
+            elif part_type == "function_call":
+                fc_data = part_data_dict.get('function_call', {})
                 sdk_parts.append(glm.Part(function_call=glm.FunctionCall(
-                    name=part_data.function_call.name,
-                    args=part_data.function_call.args # args is already a dict
+                    name=fc_data.get('name'),
+                    args=fc_data.get('args') 
                 )))
-            elif part_data.type == "function_response":
-                # part_data is FunctionResponsePart
-                # part_data.function_response is FunctionResponseData(name=..., response=FunctionResponseDataContent(content=...))
+            elif part_type == "function_response":
+                fr_data = part_data_dict.get('function_response', {})
+                fr_response_data = fr_data.get('response', {})
                 sdk_parts.append(glm.Part(function_response=glm.FunctionResponse(
-                    name=part_data.function_response.name,
-                    response={'content': part_data.function_response.response.content} # Ensure structure is {'content': ...}
+                    name=fr_data.get('name'),
+                    response={'content': fr_response_data.get('content')} 
                 )))
-            # Add other part types if you use them (inline_data, file_data etc.)
-            # else:
-            #     note = f"Unsupported part type '{part_data.type}' in message {msg_index}. Skipping part."
-            #     log.warning(note, extra={"event_type": "unsupported_message_part_type", "details": {"message_index": msg_index, "part_type": part_data.type}})
-            #     preparation_notes.append(note)
         
         if sdk_parts:
-            # Role is already validated by AppState.Message model to be one of "user", "model", "function", "system"
-            role_for_sdk = msg_from_history.role
-            if role_for_sdk == "system": 
-                # For Gemini, system prompts are handled via system_instruction parameter in model initialization
-                # System messages in conversation history are unnecessary and should be skipped
-                # This prevents inefficient token usage and potential confusion
-                note = f"Skipping system message at index {msg_index} - system prompts handled via model system_instruction parameter."
-                log.debug(note, extra={"event_type": "skip_system_message_for_efficiency", "details": {"message_index": msg_index}})
+            role_for_sdk = msg_dict_from_history.get('role', 'user')
+            if role_for_sdk == "system" and msg_dict_from_history.get("message_type") != "workflow_context_injection": 
+                note = f"Skipping non-contextual system message at index {msg_index}"
+                log.debug(note, extra={"event_type": "skip_system_message"})
                 preparation_notes.append(note)
                 continue
+            elif role_for_sdk == "function": # Gemini uses 'function' role for tool responses
+                role_for_sdk = "tool" # Standardize to 'tool' if that's what SDK expects for responses
+                                     # However, Google SDK examples use 'function' role for FunctionResponse parts.
+                                     # Let's stick to what the Message model and Pydantic conversion implies.
+                                     # If role was 'tool', we would have converted it to 'function_response' part.
+                                     # Role 'function' is used by Gemini for FunctionResponse content.
+                pass # Keep as 'function' if parts are FunctionResponse as per Gemini examples
 
-            formatted_messages.append(glm.Content(parts=sdk_parts, role=role_for_sdk))
+            try:
+                formatted_messages.append(glm.Content(parts=sdk_parts, role=role_for_sdk))
+            except Exception as e_glm_content:
+                note = f"Error creating glm.Content for message at index {msg_index} (Role: {role_for_sdk}): {e_glm_content}"
+                log.error(note, exc_info=True)
+                preparation_notes.append(note)
         else:
-            note = f"Message at index {msg_index} (role '{msg_from_history.role}') had no convertible parts. Skipping message."
-            log.warning(note, extra={"event_type": "message_no_convertible_parts", "details": {"message_index": msg_index, "role": msg_from_history.role}})
+            note = f"Message at index {msg_index} (role '{msg_dict_from_history.get('role')}') had no convertible parts after processing. Skipping."
+            log.warning(note, extra={"event_type": "message_no_convertible_parts_final"})
             preparation_notes.append(note)
             
     # Basic sequence validation/repair (simplified from guide for now)
@@ -417,7 +486,7 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
 
     log.debug(
         "Prepared messages for LLM from AppState.",
-        extra={"event_type": "prepare_messages_from_appstate_completed", "details": {"formatted_message_count": len(formatted_messages), "original_truncated_count": len(history_to_convert), "preparation_notes_count": len(preparation_notes)}}
+        extra={"event_type": "prepare_messages_from_appstate_completed", "details": {"formatted_message_count": len(formatted_messages), "original_truncated_count": len(history_to_convert_dicts), "preparation_notes_count": len(preparation_notes)}}
     )
     return formatted_messages, preparation_notes
 

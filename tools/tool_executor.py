@@ -294,7 +294,7 @@ class ToolExecutor:
             The result of the tool execution
         """
         current_config = get_config() # Get current config instance
-        tool_call_id = start_tool_call() # Start tool call context
+        tool_call_id = start_tool_call(tool_name) # Start tool call context with tool name
         start_time = time.monotonic()
         
         log_extra_base = {"tool_name": tool_name}

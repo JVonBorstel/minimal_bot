@@ -134,20 +134,30 @@ def save_user_profile(user_profile_dict: Dict[str, Any]) -> bool:
                 try:
                     data_to_save['profile_data'] = json.dumps(data_to_save['profile_data'])
                 except TypeError:
-                    logger.error(f"Could not serialize profile_data for user {user_id}. Saving as None/not updating.")
-                    # Decide handling: either remove or save as is if it was already a string/None
-                    if isinstance(user_profile_dict['profile_data'], dict): # only pop if it was the problematic dict
-                        data_to_save.pop('profile_data', None)
-            
+                    logger.error(f"Could not serialize profile_data for user {user_id}. Saving as null/None.", exc_info=True)
+                    data_to_save['profile_data'] = None # Explicitly set to None for DB if serialization fails
+            elif 'profile_data' in data_to_save and data_to_save['profile_data'] is None:
+                 # Ensure None is passed if it was explicitly set to None (SQLAlchemy handles None as NULL)
+                 pass # data_to_save['profile_data'] is already None
+            elif 'profile_data' not in data_to_save and user_profile: # If key is missing on update, keep existing
+                pass # Don't change it if not provided in the update dict
+            elif 'profile_data' not in data_to_save and not user_profile: # If key is missing on insert, it will be default null
+                 data_to_save['profile_data'] = None # Explicitly set to None for new profile if not provided
+
             # Serialize tool_adapter_metrics if it's a dict
             if 'tool_adapter_metrics' in data_to_save and isinstance(data_to_save['tool_adapter_metrics'], dict):
                 try:
                     data_to_save['tool_adapter_metrics'] = json.dumps(data_to_save['tool_adapter_metrics'])
                 except TypeError:
-                    logger.error(f"Could not serialize tool_adapter_metrics for user {user_id}. Saving as None/not updating.")
-                    if isinstance(user_profile_dict['tool_adapter_metrics'], dict):
-                        data_to_save.pop('tool_adapter_metrics', None)
-            
+                    logger.error(f"Could not serialize tool_adapter_metrics for user {user_id}. Saving as null/None.", exc_info=True)
+                    data_to_save['tool_adapter_metrics'] = None # Explicitly set to None for DB
+            elif 'tool_adapter_metrics' in data_to_save and data_to_save['tool_adapter_metrics'] is None:
+                pass
+            elif 'tool_adapter_metrics' not in data_to_save and user_profile:
+                pass
+            elif 'tool_adapter_metrics' not in data_to_save and not user_profile:
+                data_to_save['tool_adapter_metrics'] = None
+
             current_time = int(time.time())
 
             if user_profile: # Update existing profile

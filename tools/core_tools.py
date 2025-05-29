@@ -6,7 +6,7 @@ from ._tool_decorator import tool_function
 from config import Config
 from datetime import datetime
 from user_auth.permissions import Permission
-from workflows.onboarding import OnboardingWorkflow
+# from workflows.onboarding import OnboardingWorkflow  # MOVED TO LAZY IMPORT
 from user_auth import db_manager
 import time
 
@@ -292,6 +292,9 @@ async def preferences(action: str = "view", app_state: Any = None) -> Dict[str, 
         elif action_lower == "restart_onboarding":
             # Allow user to restart onboarding
             try:
+                # Lazy import to avoid circular imports
+                from workflows.onboarding import OnboardingWorkflow
+                
                 # Clear existing onboarding completion
                 profile_data["onboarding_completed"] = False
                 if "onboarding_completed_at" in profile_data:

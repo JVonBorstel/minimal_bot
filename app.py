@@ -8,9 +8,11 @@ import logging
 from typing import Dict, Any, cast # Added cast for type hinting
 import re
 
-from llm_interface import LLMInterface # Keep this, it's used in the shim
+from llm_interface import LLMInterface # Ensure LLMInterface is imported
 from tools.tool_executor import ToolExecutor # Keep this, it's used in the shim
 from core_logic import start_streaming_response, HistoryResetRequiredError # Keep this
+from core_logic.intent_classifier import IntentClassifier # Added import for IntentClassifier
+from workflows.workflow_manager import WorkflowManager # Added import for WorkflowManager
 
 # Imports for Bot Framework and Web Server
 from aiohttp import web
@@ -115,6 +117,7 @@ try:
     from config import get_config, Config # Config class for type hinting
     from bot_core.adapter_with_error_handler import AdapterWithErrorHandler
     from bot_core.my_bot import MyBot # This is where your core bot logic resides
+    from bot_core.intelligent_conversation_orchestrator import IntelligentConversationOrchestrator
     from bot_core.redis_storage import RedisStorage # If you are using Redis
     from health_checks import run_health_checks
 except ImportError as e:
@@ -162,15 +165,63 @@ BOT_FRAMEWORK_SETTINGS = BotFrameworkAdapterSettings(
 ADAPTER = AdapterWithErrorHandler(BOT_FRAMEWORK_SETTINGS, config=APP_SETTINGS)
 
 BOT: MyBot
+ORCHESTRATOR: IntelligentConversationOrchestrator
+LLM_INTERFACE_INSTANCE: LLMInterface # Added type hint
+INTENT_CLASSIFIER_INSTANCE: IntentClassifier # Added type hint
+WORKFLOW_MANAGER_INSTANCE: WorkflowManager # Added type hint
+TOOL_EXECUTOR_INSTANCE: ToolExecutor # Added type hint
+
 try:
     # CRITICAL: The MyBot class likely holds ConversationState, UserState,
     # and the logic to build the history for the LLM.
     # Ensure MyBot's constructor correctly initializes storage (e.g., RedisStorage if configured)
     # and any state accessors (e.g., for conversation history).
-    BOT = MyBot(APP_SETTINGS) # Pass the fully validated APP_SETTINGS
+    
+    # Instantiate ToolExecutor - Initialize only once
+    TOOL_EXECUTOR_INSTANCE = ToolExecutor(config=APP_SETTINGS)
+    logger.info("ToolExecutor initialized successfully.")
+    
+    # Instantiate LLMInterface - Initialize only once (required by both MyBot and IntentClassifier)
+    LLM_INTERFACE_INSTANCE = LLMInterface(config=APP_SETTINGS) 
+    logger.info("LLMInterface initialized successfully.")
+    
+    # Pass the shared instances to MyBot to prevent double initialization
+    BOT = MyBot(APP_SETTINGS, tool_executor=TOOL_EXECUTOR_INSTANCE, llm_interface=LLM_INTERFACE_INSTANCE)
     logger.info("MyBot initialized successfully.")
+
+    # Create an AppState instance for WorkflowManager and Orchestrator
+    from state_models import AppState
+    SHARED_APP_STATE = AppState()
+    logger.info("Shared AppState initialized successfully.")
+
+    # Instantiate IntentClassifier
+    INTENT_CLASSIFIER_INSTANCE = IntentClassifier(llm_interface=LLM_INTERFACE_INSTANCE)
+    logger.info("IntentClassifier initialized successfully.")
+
+    # Instantiate WorkflowManager
+    WORKFLOW_MANAGER_INSTANCE = WorkflowManager(
+        app_state=SHARED_APP_STATE,  # Use the shared app state
+        llm_interface=LLM_INTERFACE_INSTANCE, 
+        config=APP_SETTINGS
+    )
+    logger.info("WorkflowManager initialized successfully.")
+
+    # Instantiate the Orchestrator - pass the already instantiated components
+    # to prevent redundant initialization
+    ORCHESTRATOR = IntelligentConversationOrchestrator(
+        app_state=SHARED_APP_STATE,  
+        config=APP_SETTINGS,  
+        llm_interface=LLM_INTERFACE_INSTANCE, 
+        intent_classifier=INTENT_CLASSIFIER_INSTANCE, 
+        workflow_manager=WORKFLOW_MANAGER_INSTANCE, 
+        tool_executor=TOOL_EXECUTOR_INSTANCE, 
+        conversation_state=BOT.conversation_state, 
+        user_state=BOT.user_state                 
+    )
+    logger.info("IntelligentConversationOrchestrator initialized successfully.")
+
 except Exception as e:
-    logger.critical(f"Failed to initialize MyBot: {e}", exc_info=True)
+    logger.critical(f"Failed to initialize MyBot or Orchestrator: {e}", exc_info=True)
     sys.exit(1)
 
 try:
@@ -245,20 +296,15 @@ async def messages(req: web.BaseRequest) -> web.Response:
             logger.warning(f"Text integrity validation failed for incoming message from {user_id}")
 
     try:
-        # CRITICAL: The BOT.on_turn method is where the main logic happens.
-        # This method in MyBot will:
-        # 1. Create a TurnContext.
-        # 2. Load ConversationState and UserState from storage (e.g., Redis).
-        # 3. Extract/build chat history from ConversationState.
-        # 4. Pass the history and current user query to your core_logic/LLM.
-        # 5. Save updated state back to storage.
-        # -> Debugging inside BOT.on_turn for state and history is VITAL.
-        response = await ADAPTER.process_activity(activity, auth_header, BOT.on_turn)
+        # IMPORTANT: We're only using ORCHESTRATOR.process_activity as the handler
+        # The BOT instance is initialized for storage/state management but should not be 
+        # handling activities directly to prevent duplicate message handling
+        response = await ADAPTER.process_activity(activity, auth_header, ORCHESTRATOR.process_activity)
         if response:
             logger.debug(f"Sending response with status: {response.status}")
             return web.json_response(response.body, status=response.status)
         
-        logger.debug("No explicit response body to send (activity processed by BOT.on_turn), responding with 201 Accepted.")
+        logger.debug("No explicit response body to send (activity processed by ORCHESTRATOR.process_activity), responding with 201 Accepted.")
         return web.Response(status=201)
     except Exception as exception:
         logger.error(f"Error processing activity in messages handler: {exception}", exc_info=True)

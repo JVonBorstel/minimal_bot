@@ -286,11 +286,19 @@ def sanitize_message_content(
             if hasattr(part_zero, 'content') and isinstance(part_zero.content, str):
                  log.debug(f"Message {i}, Part 0 content length: {len(part_zero.content)}")
         
+        # Handle Message object with parts that have 'text' attribute
         if hasattr(msg, 'parts') and isinstance(msg.parts, list) and len(msg.parts) > 0 and \
-           hasattr(msg.parts[0], 'content') and isinstance(msg.parts[0].content, str): # Changed .text to .content
-            if len(msg.parts[0].content) > max_content_length: # Changed .text to .content
+           hasattr(msg.parts[0], 'text') and isinstance(msg.parts[0].text, str):
+            if len(msg.parts[0].text) > max_content_length:
+                msg.parts[0].text = msg.parts[0].text[:max_content_length] + \
+                    "... [TRUNCATED]"
+                content_sanitized = True
+        # Handle Message object with parts that have 'content' attribute  
+        elif hasattr(msg, 'parts') and isinstance(msg.parts, list) and len(msg.parts) > 0 and \
+           hasattr(msg.parts[0], 'content') and isinstance(msg.parts[0].content, str):
+            if len(msg.parts[0].content) > max_content_length:
                 msg.parts[0].content = msg.parts[0].content[:max_content_length] + \
-                    "... [TRUNCATED]" # Changed .text to .content
+                    "... [TRUNCATED]"
                 content_sanitized = True
         # Fallback to dict structure
         elif isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):

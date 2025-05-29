@@ -530,6 +530,34 @@ class AppState(BaseModel):
         description="List of completed or terminated workflows."
     )
 
+    def get_active_workflow_by_type(self, workflow_type: str) -> Optional[WorkflowContext]:
+        """Returns the first active workflow context of a given type, if any."""
+        if not hasattr(self, 'active_workflows') or not self.active_workflows:
+            return None
+        for wf_context in self.active_workflows.values():
+            if wf_context.workflow_type == workflow_type and wf_context.status == "active":
+                return wf_context
+        return None
+
+    def get_primary_active_workflow_name(self) -> Optional[str]:
+        """
+        Placeholder/Simplified: Gets the type of the first active workflow.
+        A more robust mechanism might be needed if multiple concurrent workflows of different types are common.
+        For now, it could prioritize a common one like "onboarding".
+        """
+        if not hasattr(self, 'active_workflows') or not self.active_workflows:
+            return None
+        # Prioritize onboarding if active
+        onboarding_wf = self.get_active_workflow_by_type("onboarding")
+        if onboarding_wf:
+            return "onboarding"
+        
+        # Fallback to the type of the first active workflow found (if any other type)
+        for wf_context in self.active_workflows.values():
+            if wf_context.status == "active":
+                return wf_context.workflow_type 
+        return None
+
     # --- Permission Manager Instance (cached) ---
     # _permission_manager_instance: Optional[PermissionManager] = Field(default=None, exclude=True) # Old way
     # Declare as a regular instance variable, not a Pydantic Field, for internal caching.

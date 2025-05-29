@@ -15,6 +15,10 @@ from user_auth.permissions import UserRole
 from config import get_config
 from pydantic import BaseModel, Field
 from botbuilder.schema import CardAction, ActionTypes
+from botbuilder.core import TurnContext
+
+# Import LLMInterface for type hinting and potential use
+from llm_interface import LLMInterface
 
 log = logging.getLogger(__name__)
 
@@ -149,11 +153,28 @@ ONBOARDING_QUESTIONS = [
 class OnboardingWorkflow:
     """Manages the onboarding workflow for new users."""
     
-    def __init__(self, user_profile: UserProfile, app_state: AppState):
+    def __init__(self, user_profile: UserProfile, app_state: AppState, llm_interface: Optional[LLMInterface], workflow_context: WorkflowContext):
+        """
+        Initializes the OnboardingWorkflow instance.
+
+        Args:
+            user_profile: The profile of the user undergoing onboarding.
+            app_state: The overall application state (used for context, permissions, etc.).
+            llm_interface: The interface to the LLM, for interpreting user responses.
+            workflow_context: The specific context for this onboarding workflow instance.
+        """
         self.user_profile = user_profile
-        self.app_state = app_state
-        self.config = get_config()
-        
+        self.app_state = app_state # Provides broader context if needed by workflow steps
+        self.llm_interface = llm_interface
+        self.context = workflow_context # This holds current_stage, data["answers"], etc.
+        self.config = get_config() # Existing config loading
+        log.info(f"OnboardingWorkflow initialized for user {user_profile.user_id}, workflow ID {self.context.workflow_id}")
+
+    @classmethod
+    def from_context(cls, user_profile: UserProfile, app_state: AppState, llm_interface: Optional[LLMInterface], workflow_context: WorkflowContext) -> 'OnboardingWorkflow':
+        """Factory method to create/rehydrate an OnboardingWorkflow from its context."""
+        return cls(user_profile, app_state, llm_interface, workflow_context)
+
     @staticmethod
     def should_trigger_onboarding(user_profile: UserProfile, app_state: AppState) -> bool:
         """Determines if onboarding should be triggered for this user."""
@@ -163,9 +184,11 @@ class OnboardingWorkflow:
         time_since_first_seen = current_time - user_profile.first_seen_timestamp
         is_new_user = time_since_first_seen < 300  # 5 minutes
         
-        # Check if onboarding already completed
+        # Check if onboarding already completed or explicitly postponed/declined
         profile_data = user_profile.profile_data or {}
         onboarding_completed = profile_data.get("onboarding_completed", False)
+        onboarding_postponed = profile_data.get("onboarding_interaction_status") == "postponed"
+        onboarding_declined = profile_data.get("onboarding_interaction_status") == "declined"
         
         # Check if there's already an active onboarding workflow
         has_active_onboarding = any(
@@ -176,56 +199,243 @@ class OnboardingWorkflow:
         should_trigger = (
             is_new_user and 
             not onboarding_completed and 
+            not onboarding_postponed and
+            not onboarding_declined and
             not has_active_onboarding
         )
         
         if should_trigger:
             log.info(f"Triggering onboarding for new user {user_profile.user_id} (first seen {time_since_first_seen}s ago)")
+        elif onboarding_postponed:
+            log.info(f"Onboarding for user {user_profile.user_id} was postponed. Not triggering.")
+        elif onboarding_declined:
+            log.info(f"Onboarding for user {user_profile.user_id} was declined. Not triggering.")
         
         return should_trigger
     
     def start_workflow(self) -> WorkflowContext:
-        """Starts the onboarding workflow."""
+        """DEPRECATED: This logic is now primarily in WorkflowManager.
+           This instance method should be replaced by a simpler start() that returns the first question.
+        """
+        log.warning("OnboardingWorkflow.start_workflow() is deprecated. WorkflowManager now handles context creation.")
+        # Fallback or error, as WorkflowManager should create the context.
+        # For now, let's assume context is already created and passed in __init__.
+        # This method could be repurposed to return the initial activity.
+        if not self.context or self.context.workflow_type != "onboarding":
+            raise ValueError("OnboardingWorkflow cannot start without a valid onboarding WorkflowContext.")
         
-        workflow = WorkflowContext(
-            workflow_type="onboarding",
-            status="active",
-            current_stage="welcome",
-            data={
-                "user_id": self.user_profile.user_id,
-                "current_question_index": 0,
-                "answers": {},
-                "started_at": datetime.utcnow().isoformat(),
-                "questions_total": len(ONBOARDING_QUESTIONS)
-            }
+        # If current_stage is already set (e.g. by WorkflowManager), respect it.
+        # Otherwise, set to an initial stage.
+        if not self.context.current_stage:
+            self.context.current_stage = "asking_welcome_name" # Example initial stage for questions
+        
+        # Ensure necessary data fields are initialized if not already by WorkflowManager
+        if "current_question_index" not in self.context.data:
+            self.context.data["current_question_index"] = 0
+        if "answers" not in self.context.data:
+            self.context.data["answers"] = {}
+        if "questions_total" not in self.context.data:
+            self.context.data["questions_total"] = len(ONBOARDING_QUESTIONS)
+        if "started_at" not in self.context.data:
+            self.context.data["started_at"] = datetime.utcnow().isoformat()
+
+        self.context.add_history_event(
+            "WORKFLOW_INIT",
+            f"OnboardingWorkflow instance prepared for user {self.user_profile.display_name}. Stage: {self.context.current_stage}",
+            self.context.current_stage
         )
+        # The WorkflowContext is already in app_state.active_workflows handled by WorkflowManager
+        log.info(f"OnboardingWorkflow prepared for workflow ID {self.context.workflow_id}")
+        return self.context # Return the context for WorkflowManager to have it if needed.
+
+    async def start(self, start_params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Starts the onboarding process by asking the first question.
+        Called by WorkflowManager after the WorkflowContext is created and stored.
+        Updates self.context.current_stage and self.context.data as needed.
+        Returns:
+            A dictionary representing the activity for the first question.
+        """
+        log.info(f"OnboardingWorkflow.start() called for WF ID: {self.context.workflow_id}")
+        self.context.current_stage = "asking_question" # A generic stage for asking any question
+        self.context.data["current_question_index"] = 0
+        self.context.data["answers"] = {}
+        self.context.data["processing_follow_ups"] = False # Ensure reset
+        self.context.data.pop("follow_up_questions", None)
+        self.context.data.pop("follow_up_index", None)
+        self.context.data["questions_total"] = len(ONBOARDING_QUESTIONS)
+
+        first_question_model = ONBOARDING_QUESTIONS[0]
+        self.context.data["current_question_key"] = first_question_model.key # Track current question key
+
+        response_dict = self._format_question_response(first_question_model, self.context)
         
-        workflow.add_history_event(
-            "WORKFLOW_STARTED",
-            f"Onboarding workflow started for user {self.user_profile.display_name}",
-            "welcome"
+        self.context.add_history_event(
+            "QUESTION_ASKED", 
+            f"Asked: {first_question_model.question}", 
+            stage=self.context.current_stage,
+            details={"question_key": first_question_model.key}
         )
+        self.context.update_timestamp()
+        return response_dict
+
+    async def _get_llm_interpreted_answer(self, question: OnboardingQuestion, user_response_text: str) -> Optional[Any]:
+        """Uses LLM to interpret user's answer for choice-based or yes/no questions."""
+        if not self.llm_interface:
+            log.warning(f"LLM interface not available for interpreting answer to: {question.key}")
+            return None 
+
+        prompt_text = ""
+        if question.question_type == OnboardingQuestionType.CHOICE or question.question_type == OnboardingQuestionType.MULTI_CHOICE:
+            choices_str = "\n".join([f"- {c}" for c in question.choices])
+            prompt_text = (
+                f"You are an intelligent assistant helping a user answer an onboarding question. "
+                f"The question is: '{question.question}'\n"
+                f"The available choices are:\n{choices_str}\n\n"
+                f"The user responded: '{user_response_text}'\n\n"
+                f"Carefully analyze the user's response. "
+                f"If the user's response clearly matches one or more of the provided choices, respond with the exact text of the matching choice(s). "
+                f"For multi-choice questions, if multiple choices match, list them separated by a semicolon and a space (e.g., 'Choice A; Choice B'). "
+                f"If the user's response does not clearly match any of the choices, or if it\'s ambiguous, respond with the exact word 'UNCLEAR'. "
+                f"Do not add any extra explanation or conversational filler. Respond ONLY with the choice text(s) or 'UNCLEAR'."
+            )
+        elif question.question_type == OnboardingQuestionType.YES_NO:
+            prompt_text = (
+                f"You are an intelligent assistant helping a user answer an onboarding question. "
+                f"The question is: '{question.question}'\n"
+                f"The user responded: '{user_response_text}'\n\n"
+                f"Does the user's response definitively mean 'yes' or definitively mean 'no'? "
+                f"If it clearly means 'yes', respond with the exact word 'yes'. "
+                f"If it clearly means 'no', respond with the exact word 'no'. "
+                f"If the meaning is ambiguous or neither clearly yes nor no, respond with the exact word 'UNCLEAR'. "
+                f"Do not add any extra explanation or conversational filler. Respond ONLY with 'yes', 'no', or 'UNCLEAR'."
+            )
+        else:
+            log.debug(f"Question type {question.question_type} for key {question.key} is not LLM-interpretable by this method.")
+            return None # Not an LLM-interpretable question type for this method
+
+        try:
+            # Corrected message format for Gemini
+            messages = [{ "role": "user", "parts": [{"text": prompt_text}]}]
+            llm_response_str = ""
+            
+            # Use the llm_interface to get a response. Ensure it handles streaming/non-streaming appropriately.
+            # This part assumes llm_interface has a method like generate_text_response or similar for single, non-streamed call.
+            # If generate_content_stream is the only option, it needs to be aggregated.
+            stream = self.llm_interface.generate_content_stream(messages=messages, app_state=self.app_state)
+            async for chunk in stream:
+                if hasattr(chunk, 'text') and chunk.text:
+                    llm_response_str += chunk.text
+                elif isinstance(chunk, dict) and chunk.get('text'): 
+                    llm_response_str += chunk['text']
+            
+            interpreted_value_raw = llm_response_str.strip()
+            log.info(f"LLM interpreted answer for Q: '{question.key}'. User: '{user_response_text}'. LLM raw output: '{interpreted_value_raw}'")
+
+            if interpreted_value_raw.upper() == "UNCLEAR":
+                return "UNCLEAR_BY_LLM"
+
+            if question.question_type == OnboardingQuestionType.CHOICE:
+                for choice in question.choices:
+                    if choice.lower() == interpreted_value_raw.lower():
+                        return choice
+                log.warning(f"LLM returned '{interpreted_value_raw}' for CHOICE which is not an exact match for {question.key}. Will be treated as UNCLEAR by fallback.")
+                return "UNCLEAR_BY_LLM" 
+
+            elif question.question_type == OnboardingQuestionType.MULTI_CHOICE:
+                selected_choices = []
+                raw_selected = [s.strip() for s in interpreted_value_raw.split(';')]
+                for sel_text in raw_selected:
+                    found_match = False
+                    for choice in question.choices:
+                        if choice.lower() == sel_text.lower():
+                            if choice not in selected_choices: # Avoid duplicates
+                                selected_choices.append(choice)
+                            found_match = True
+                            break
+                    if not found_match:
+                        log.warning(f"LLM multi-choice selection '{sel_text}' not in choices for {question.key}.")
+                
+                if selected_choices:
+                    return selected_choices
+                log.warning(f"LLM interpreted '{interpreted_value_raw}' for MULTI_CHOICE, but no valid selections extracted for {question.key}.")
+                return "UNCLEAR_BY_LLM"
+
+            elif question.question_type == OnboardingQuestionType.YES_NO:
+                if interpreted_value_raw.lower() == "yes": return "yes"
+                if interpreted_value_raw.lower() == "no": return "no"
+                log.warning(f"LLM returned '{interpreted_value_raw}' for YES_NO, not 'yes' or 'no' for {question.key}.")
+                return "UNCLEAR_BY_LLM"
+            
+            # Should not be reached if question types are handled above
+            log.warning(f"LLM interpretation for {question.key} (type {question.question_type}) fell through: {interpreted_value_raw}")
+            return None 
+        except Exception as e:
+            log.error(f"Error during LLM answer interpretation for {question.key}: {e}", exc_info=True)
+            return None # Fallback on error, will trigger standard validation
+
+    def _get_current_question_model(self) -> Optional[OnboardingQuestion]:
+        """Gets the current OnboardingQuestion model based on workflow context."""
+        if self.context.data.get("processing_follow_ups"):
+            follow_up_questions = self.context.data.get("follow_up_questions", [])
+            follow_up_index = self.context.data.get("follow_up_index", 0)
+            if follow_up_index < len(follow_up_questions):
+                return follow_up_questions[follow_up_index]
+        else:
+            current_index = self.context.data.get("current_question_index", 0)
+            if current_index < len(ONBOARDING_QUESTIONS):
+                return ONBOARDING_QUESTIONS[current_index]
+        log.warning(f"_get_current_question_model: Could not determine current question. Data: {self.context.data}")
+        return None
+
+    def _incrementally_update_user_profile(self, question: OnboardingQuestion, processed_value: Any):
+        """Helper to incrementally update UserProfile based on an answer."""
+        if self.user_profile.profile_data is None: self.user_profile.profile_data = {}
+        if "preferences" not in self.user_profile.profile_data: self.user_profile.profile_data["preferences"] = {}
+
+        prefs = self.user_profile.profile_data["preferences"]
+        profile_creds = self.user_profile.profile_data.get("personal_credentials", {})
+        if not isinstance(profile_creds, dict): profile_creds = {} # Ensure it is a dict
+
+        key = question.key
+
+        if key == "welcome_name": prefs["preferred_name"] = processed_value
+        elif key == "primary_role": prefs["primary_role"] = processed_value
+        elif key == "main_projects": 
+            if isinstance(processed_value, str):
+                prefs["main_projects"] = [p.strip() for p in processed_value.split(",") if p.strip()]
+            elif isinstance(processed_value, list): # If LLM returns a list
+                prefs["main_projects"] = [str(p).strip() for p in processed_value if str(p).strip()]
+            else:
+                prefs["main_projects"] = []
+        elif key == "tool_preferences": 
+            prefs["tool_preferences"] = processed_value if isinstance(processed_value, list) else []
+        elif key == "communication_style": prefs["communication_style"] = processed_value
+        elif key == "notifications": prefs["notifications_enabled"] = (processed_value == "yes")
+        elif key == "personal_credentials":
+            if processed_value == "no":
+                profile_creds = {"setup_declined": True} # Reset credentials if declined
+            else: # User said yes, clear any previous decline
+                profile_creds.pop("setup_declined", None)
+        elif key == "github_token" and processed_value: profile_creds["github_token"] = processed_value 
+        elif key == "jira_email" and processed_value: profile_creds["jira_email"] = processed_value
+        elif key == "jira_token" and processed_value: profile_creds["jira_token"] = processed_value
         
-        # Add to active workflows
-        self.app_state.active_workflows[workflow.workflow_id] = workflow
-        
-        log.info(f"Started onboarding workflow {workflow.workflow_id} for user {self.user_profile.user_id}")
-        return workflow
-    
-    def process_answer(self, workflow_id: str, user_input: str) -> Dict[str, Any]:
+        self.user_profile.profile_data["personal_credentials"] = profile_creds
+        log.debug(f"Incrementally updated user_profile with {key}: {processed_value}. Prefs: {prefs}, Creds: {profile_creds}")
+        # Actual DB save of user_profile will be handled by a higher layer or at end of workflow.
+
+    async def handle_response(self, user_input: str, turn_context: TurnContext) -> Dict[str, Any]:
         """Processes a user's answer to an onboarding question."""
         
-        if workflow_id not in self.app_state.active_workflows:
-            return {"error": "Workflow not found"}
-            
-        workflow = self.app_state.active_workflows[workflow_id]
-        
-        if workflow.workflow_type != "onboarding" or workflow.status != "active":
-            return {"error": "Invalid workflow state"}
+        if self.context.status != "active":
+            log.warning(f"handle_response called on non-active workflow: {self.context.workflow_id}, status: {self.context.status}")
+            return {"type":"message", "text": "This onboarding session is no longer active."} # Return a message dict
         
         user_input_lower = user_input.lower().strip()
+        self.context.add_history_event("USER_RESPONSE_RECEIVED", f"Received: {user_input}", self.context.current_stage)
 
-        # --- START: Detect if user is asking a question instead of answering ---
+        # --- START: Detect if user is asking a question instead of answering (copied from old process_answer) ---
         question_indicators = [
             "what is", "what's", "whats", "who is", "who's", "how do", "how can", 
             "where is", "where's", "when is", "when's", "why is", "why's", "why",
@@ -236,179 +446,99 @@ class OnboardingWorkflow:
         if (user_input.endswith("?") or 
             any(indicator in user_input_lower for indicator in question_indicators)):
             
-            # User seems to be asking a question, not answering the onboarding question
-            current_index = workflow.data.get("current_question_index", 0)
-            
-            if workflow.data.get("processing_follow_ups"):
-                follow_up_questions = workflow.data.get("follow_up_questions", [])
-                follow_up_index = workflow.data.get("follow_up_index", 0)
-                if follow_up_index < len(follow_up_questions):
-                    current_question = follow_up_questions[follow_up_index]
-                else:
-                    current_question = None
-            elif current_index < len(ONBOARDING_QUESTIONS):
-                current_question = ONBOARDING_QUESTIONS[current_index]
-            else:
-                current_question = None
-            
+            current_question = self._get_current_question_model()
             if current_question:
-                # Respond that we're in onboarding mode and re-ask the question
                 return {
-                    "success": False,
-                    "message": f"I noticed you asked a question, but I'm currently waiting for your answer to the setup question. Let me ask again:\n\n{current_question.question}\n\n(If you'd like to skip setup entirely, type 'skip onboarding')",
-                    "retry_question": True
+                    "type": "message", 
+                    "text": f"I noticed you asked a question, but I'm currently waiting for your answer to the setup question. Let me ask again:\n\n{current_question.question}\n\n(If you'd like to skip setup entirely, type 'skip onboarding')",
+                    "retry_question": True # This flag is for internal logic that might re-prompt
                 }
             else:
-                return {"error": "Unable to determine current onboarding question"}
+                return {"type": "message", "text": "Error: Unable to determine current onboarding question to re-ask."}
         # --- END: Question detection ---
 
-        # --- START: Handle restart onboarding command ---
+        # --- START: Handle restart onboarding command (copied from old process_answer) ---
         restart_onboarding_commands = ["restart onboarding", "start over onboarding", "reset my onboarding", "restart setup"]
         if user_input_lower in restart_onboarding_commands:
-            log.info(f"User {self.user_profile.user_id} requested to restart onboarding. Workflow ID: {workflow_id}")
-            # Reset workflow data to initial state
-            workflow.data["current_question_index"] = 0
-            workflow.data["answers"] = {}
-            workflow.data["processing_follow_ups"] = False
-            workflow.data.pop("follow_up_questions", None)
-            workflow.data.pop("follow_up_index", None)
-            workflow.current_stage = "welcome_restarted"
-            workflow.add_history_event("WORKFLOW_RESTARTED", "User restarted onboarding process.", "welcome_restarted")
+            log.info(f"User {self.user_profile.user_id} requested to restart onboarding. Workflow ID: {self.context.workflow_id}")
+            self.context.data["current_question_index"] = 0
+            self.context.data["answers"] = {}
+            self.context.data["processing_follow_ups"] = False
+            self.context.data.pop("follow_up_questions", None)
+            self.context.data.pop("follow_up_index", None)
+            self.context.current_stage = "welcome_restarted"
+            self.context.add_history_event("WORKFLOW_RESTARTED", "User restarted onboarding process.", "welcome_restarted")
             
-            # Get the first question again
             first_question = ONBOARDING_QUESTIONS[0]
-            response = self._format_question_response(first_question, workflow)
-            response["message"] = "Okay, let's start the onboarding over. " + response["message"] # Prepend a confirmation
+            response = self._format_question_response(first_question, self.context)
+            response["text"] = "Okay, let's start the onboarding over. " + response["text"]
             return response
         # --- END: Handle restart onboarding command ---
 
-        current_index = workflow.data.get("current_question_index", 0)
-        
-        # Handle case where current_index might be out of bounds due to follow-ups being processed
-        # This situation should ideally be handled by _get_next_question advancing states correctly
-        # but as a safeguard:
-        if workflow.data.get("processing_follow_ups"):
-            follow_up_questions = workflow.data.get("follow_up_questions", [])
-            follow_up_index = workflow.data.get("follow_up_index", 0)
-            if follow_up_index >= len(follow_up_questions):
-                 # Attempt to transition from follow-ups to next main question if stuck
-                log.warning(f"process_answer: Follow-up index {follow_up_index} out of bounds for {len(follow_up_questions)} follow-ups. Attempting to advance state.")
-                # This mimics part of _get_next_question logic to ensure progression
-                workflow.data["processing_follow_ups"] = False
-                workflow.data.pop("follow_up_questions", None)
-                workflow.data.pop("follow_up_index", None)
-                current_index = workflow.data.get("current_question_index", 0) + 1 # Advance main index
-                workflow.data["current_question_index"] = current_index
-                # Now check if onboarding is complete after this forced advancement
-        if current_index >= len(ONBOARDING_QUESTIONS):
-            log.info(f"process_answer: Forced advancement led to onboarding completion for workflow {workflow_id}.")
-            return self._complete_onboarding(workflow) # Complete onboarding
-        # Otherwise, proceed to fetch the new current_question
-        log.info(f"process_answer: Forced advancement to main question index {current_index} for workflow {workflow_id}.")
+        current_question_model = self._get_current_question_model()
+        if not current_question_model:
+            log.error(f"Could not determine current question for workflow {self.context.workflow_id}. Stage: {self.context.current_stage}, Data: {self.context.data}")
+            return await self._complete_onboarding(error_message="Internal error: Could not determine current question.")
 
+        # --- Process user_input against current_question_model --- 
+        processed_value: Any = None
+        validation_error_message: Optional[str] = None
+        skipped_non_required = False
 
-        if current_index >= len(ONBOARDING_QUESTIONS) and not workflow.data.get("processing_follow_ups"):
-            return self._complete_onboarding(workflow)
-        
-        # Determine if we are processing a main question or a follow-up question
-        if workflow.data.get("processing_follow_ups"):
-            follow_up_questions = workflow.data.get("follow_up_questions", [])
-            follow_up_index = workflow.data.get("follow_up_index", 0)
-            if follow_up_index < len(follow_up_questions):
-                current_question = follow_up_questions[follow_up_index]
+        # Attempt LLM interpretation first for applicable types
+        if current_question_model.question_type in [OnboardingQuestionType.CHOICE, OnboardingQuestionType.MULTI_CHOICE, OnboardingQuestionType.YES_NO]:
+            llm_interpreted_value = await self._get_llm_interpreted_answer(current_question_model, user_input)
+            if llm_interpreted_value == "UNCLEAR_BY_LLM":
+                log.info(f"LLM found answer unclear for Q: {current_question_model.key}. Falling back to validation.")
+                # Fallback to standard validation if LLM is unclear
+                validation_result = self._validate_answer(current_question_model, user_input)
+                if validation_result["valid"]:
+                    processed_value = validation_result["processed_value"]
+                    skipped_non_required = validation_result.get("skipped_non_required", False)
+                else:
+                    validation_error_message = validation_result["error"]
+            elif llm_interpreted_value is not None: # LLM provided a valid interpretation
+                processed_value = llm_interpreted_value
+                # If LLM returns a value, it implies it's valid according to LLM's understanding of choices/yes_no
+            else: # LLM interpretation failed or returned None (not unclear, but actual None)
+                log.warning(f"LLM interpretation returned None or failed for {current_question_model.key}. Falling back to standard validation.")
+                validation_result = self._validate_answer(current_question_model, user_input)
+                if validation_result["valid"]:
+                    processed_value = validation_result["processed_value"]
+                    skipped_non_required = validation_result.get("skipped_non_required", False)
+                else:
+                    validation_error_message = validation_result["error"]
+        else: # For TEXT, EMAIL, etc. use original validation directly
+            validation_result = self._validate_answer(current_question_model, user_input)
+            if validation_result["valid"]:
+                processed_value = validation_result["processed_value"]
+                skipped_non_required = validation_result.get("skipped_non_required", False)
             else:
-                # Should have been handled by _get_next_question or the safeguard above
-                log.error(f"Inconsistent state: processing_follow_ups is true but follow_up_index is out of bounds. WF: {workflow_id}")
-                return {"error": "Internal error: Inconsistent follow-up state."}
-        else:
-            current_question = ONBOARDING_QUESTIONS[current_index]
-        
-        # --- START: Improve name validation ---
-        if current_question.key == "welcome_name":
-            # Check for overly short names or command-like phrases more strictly for the name question
-            forbidden_name_phrases = ["reset", "skip", "help", "start over", "no", "yes", "@bot"]
-            if len(user_input_lower) < 2 or any(phrase in user_input_lower for phrase in forbidden_name_phrases):
-                return {
-                    "success": False,
-                    "message": "That doesn't seem like a typical name. Please provide a name you'd like me to call you, or type 'skip onboarding' to bypass setup.",
-                    "retry_question": True
-                }
-        # --- END: Improve name validation ---
+                validation_error_message = validation_result["error"]
 
-        # Validate and store the answer
-        validation_result = self._validate_answer(current_question, user_input)
-        if not validation_result["valid"]:
-            return {
-                "success": False,
-                "message": validation_result["error"],
-                "retry_question": True
-            }
-        
-        processed_value = validation_result["processed_value"]
-        
-        # Store the raw answer in workflow.data for full record
-        workflow.data["answers"][current_question.key] = processed_value
-        
-        # Incrementally update UserProfile's profile_data with the answer
-        # Initialize profile_data and preferences if they don't exist
-        if self.user_profile.profile_data is None:
-            self.user_profile.profile_data = {}
-        if "preferences" not in self.user_profile.profile_data:
-            self.user_profile.profile_data["preferences"] = {}
+        if validation_error_message:
+            return {"type": "message", "text": validation_error_message, "retry_question": True}
 
-        # Map onboarding keys to UserProfile.preferences keys
-        # This logic is similar to _complete_onboarding but applied incrementally
-        if current_question.key == "welcome_name":
-            self.user_profile.profile_data["preferences"]["preferred_name"] = processed_value
-        elif current_question.key == "primary_role":
-            self.user_profile.profile_data["preferences"]["primary_role"] = processed_value
-        elif current_question.key == "main_projects":
-            projects = [p.strip() for p in (processed_value or "").split(",") if p.strip()]
-            self.user_profile.profile_data["preferences"]["main_projects"] = projects
-        elif current_question.key == "tool_preferences":
-            self.user_profile.profile_data["preferences"]["tool_preferences"] = processed_value if isinstance(processed_value, list) else []
-        elif current_question.key == "communication_style":
-            self.user_profile.profile_data["preferences"]["communication_style"] = processed_value
-        elif current_question.key == "notifications":
-            self.user_profile.profile_data["preferences"]["notifications_enabled"] = (processed_value == "yes")
-        elif current_question.key == "personal_credentials":
-             # This doesn't directly go into preferences, but its answer ("yes"/"no") is recorded.
-             # Follow-up questions will handle specific credential details.
-             # If "no", then personal_credentials might be cleared or marked as declined.
-            if processed_value == "no":
-                if "personal_credentials" in self.user_profile.profile_data:
-                    self.user_profile.profile_data["personal_credentials"] = {"setup_declined": True}
-        # For credential follow-up questions
-        elif current_question.key in ["github_token", "jira_email", "jira_token"]:
-            if processed_value: # Only save if a value was provided (not skipped/none)
-                if "personal_credentials" not in self.user_profile.profile_data or \
-                   not isinstance(self.user_profile.profile_data.get("personal_credentials"), dict) or \
-                   self.user_profile.profile_data["personal_credentials"].get("setup_declined"): # type: ignore
-                    self.user_profile.profile_data["personal_credentials"] = {}
-                self.user_profile.profile_data["personal_credentials"][current_question.key] = processed_value # type: ignore
+        # Store answer and update profile incrementally
+        self.context.data["answers"][current_question_model.key] = processed_value
+        self._incrementally_update_user_profile(current_question_model, processed_value)
         
-        workflow.add_history_event(
-            "ANSWER_RECORDED",
-            f"Answer recorded for {current_question.key}: {processed_value}",
-            current_question.key
-        )
+        self.context.add_history_event("ANSWER_PROCESSED", f"Processed answer for {current_question_model.key}: {str(processed_value)[:100]}", self.context.current_stage)
         
-        # Prepare information for confirmation message
         confirmation_info = {
-            "answer_saved_key": current_question.key,
+            "answer_saved_key": current_question_model.key,
             "answer_saved_value": processed_value,
-            "question_skipped": validation_result.get("skipped_non_required", False)
+            "question_skipped": skipped_non_required
         }
         
-        # Move to next question or handle follow-ups
-        next_question_result = self._get_next_question(workflow, current_question, processed_value)
+        next_question_activity_dict = await self._get_next_question_activity(current_question_model, processed_value)
         
-        # Merge confirmation info with next question result
-        if isinstance(next_question_result, dict):
-            next_question_result.update(confirmation_info)
+        if isinstance(next_question_activity_dict, dict):
+            next_question_activity_dict.update(confirmation_info) # Add answer info for potential confirmation message by orchestrator
         
-        return next_question_result
-    
+        self.context.update_timestamp()
+        return next_question_activity_dict
+
     def _validate_answer(self, question: OnboardingQuestion, user_input: str) -> Dict[str, Any]:
         """Validates a user's answer to a question."""
         
@@ -500,45 +630,59 @@ class OnboardingWorkflow:
         else:  # TEXT type
             return {"valid": True, "processed_value": user_input}
     
-    def _get_next_question(self, workflow: WorkflowContext, current_question: OnboardingQuestion, answer: Any) -> Dict[str, Any]:
-        """Gets the next question in the sequence."""
-        
-        # Check for follow-up questions
-        if (current_question.follow_up_questions and 
-            str(answer).lower() in current_question.follow_up_questions):
-            
-            follow_ups = current_question.follow_up_questions[str(answer).lower()]
-            workflow.data["follow_up_questions"] = follow_ups
-            workflow.data["follow_up_index"] = 0
-            workflow.data["processing_follow_ups"] = True
-            
-            # Return first follow-up question
-            return self._format_question_response(follow_ups[0], workflow)
-        
-        # Handle follow-up question progression
-        if workflow.data.get("processing_follow_ups"):
-            follow_up_index = workflow.data.get("follow_up_index", 0) + 1
-            follow_ups = workflow.data.get("follow_up_questions", [])
-            
-            if follow_up_index < len(follow_ups):
-                workflow.data["follow_up_index"] = follow_up_index
-                return self._format_question_response(follow_ups[follow_up_index], workflow)
+    async def _get_next_question_activity(self, answered_question: OnboardingQuestion, answer_value: Any) -> Dict[str, Any]:
+        """Determines the next question or completes onboarding. Returns an activity dictionary."""
+        # ... (Logic from original _get_next_question, adapted to use self.context and async if needed for LLM) ...
+        # This will determine if there are follow-ups, or move to the next main question, or complete.
+        # For now, placeholder that needs to be filled with adapted logic from _get_next_question
+
+        # Check for follow-up questions first
+        if answered_question.follow_up_questions and answer_value == "yes": # Simplified: only for 'yes' to 'personal_credentials'
+            if answered_question.key == "personal_credentials" and "yes" in answered_question.follow_up_questions:
+                self.context.data["processing_follow_ups"] = True
+                self.context.data["follow_up_questions"] = answered_question.follow_up_questions["yes"]
+                self.context.data["follow_up_index"] = 0
+                next_follow_up_question = self.context.data["follow_up_questions"][0]
+                self.context.data["current_question_key"] = next_follow_up_question.key
+                self.context.current_stage = f"asking_follow_up_{next_follow_up_question.key}"
+                self.context.add_history_event("FOLLOW_UP_TRIGGERED", f"Triggered follow-up for {answered_question.key}", self.context.current_stage)
+                return self._format_question_response(next_follow_up_question, self.context)
+
+        # If processing follow-ups, get the next one
+        if self.context.data.get("processing_follow_ups"):
+            follow_up_index = self.context.data.get("follow_up_index", 0) + 1
+            follow_up_questions = self.context.data.get("follow_up_questions", [])
+            if follow_up_index < len(follow_up_questions):
+                self.context.data["follow_up_index"] = follow_up_index
+                next_follow_up_question = follow_up_questions[follow_up_index]
+                self.context.data["current_question_key"] = next_follow_up_question.key
+                self.context.current_stage = f"asking_follow_up_{next_follow_up_question.key}"
+                self.context.add_history_event("NEXT_FOLLOW_UP", f"Asking next follow-up: {next_follow_up_question.key}", self.context.current_stage)
+                return self._format_question_response(next_follow_up_question, self.context)
             else:
-                # Done with follow-ups, move to next main question
-                workflow.data["processing_follow_ups"] = False
-                workflow.data.pop("follow_up_questions", None)
-                workflow.data.pop("follow_up_index", None)
-        
-        # Move to next main question
-        current_index = workflow.data.get("current_question_index", 0) + 1
-        workflow.data["current_question_index"] = current_index
-        
-        if current_index >= len(ONBOARDING_QUESTIONS):
-            return self._complete_onboarding(workflow)
-        
-        next_question = ONBOARDING_QUESTIONS[current_index]
-        return self._format_question_response(next_question, workflow)
-    
+                # Finished follow-ups, move to next main question
+                self.context.data["processing_follow_ups"] = False
+                self.context.data.pop("follow_up_questions", None)
+                self.context.data.pop("follow_up_index", None)
+                # current_question_index for main questions has not been incremented yet for the question that triggered follow-ups.
+                # So, we increment it now to move to the *next* main question.
+                current_main_index = self.context.data.get("current_question_index", 0) + 1
+                self.context.data["current_question_index"] = current_main_index
+        else:
+            # No active follow-ups, move to next main question
+            current_main_index = self.context.data.get("current_question_index", 0) + 1
+            self.context.data["current_question_index"] = current_main_index
+
+        # Check if onboarding is complete
+        if self.context.data["current_question_index"] >= len(ONBOARDING_QUESTIONS):
+            return await self._complete_onboarding()
+        else:
+            next_main_question = ONBOARDING_QUESTIONS[self.context.data["current_question_index"]]
+            self.context.data["current_question_key"] = next_main_question.key
+            self.context.current_stage = f"asking_question_{next_main_question.key}"
+            self.context.add_history_event("NEXT_QUESTION", f"Asking main question: {next_main_question.key}", self.context.current_stage)
+            return self._format_question_response(next_main_question, self.context)
+
     def _format_question_response(self, question: OnboardingQuestion, workflow: WorkflowContext) -> Dict[str, Any]:
         """Formats a question for presentation to the user."""
         
@@ -583,10 +727,10 @@ class OnboardingWorkflow:
         
         return response
     
-    def _complete_onboarding(self, workflow: WorkflowContext) -> Dict[str, Any]:
+    async def _complete_onboarding(self, error_message: Optional[str] = None) -> Dict[str, Any]:
         """Completes the onboarding workflow and saves user preferences."""
         
-        answers = workflow.data.get("answers", {})
+        answers = self.context.data.get("answers", {})
         
         # Process and store the answers in user profile
         # Most data is already incrementally added to self.user_profile.profile_data.
@@ -658,9 +802,9 @@ class OnboardingWorkflow:
         self.user_profile.profile_data = profile_data
         
         # Mark workflow as completed
-        workflow.status = "completed"
-        workflow.current_stage = "completed"
-        workflow.add_history_event(
+        self.context.status = "completed"
+        self.context.current_stage = "completed"
+        self.context.add_history_event(
             "WORKFLOW_COMPLETED",
             "Onboarding workflow completed successfully",
             "completed",
@@ -668,9 +812,9 @@ class OnboardingWorkflow:
         )
         
         # Move to completed workflows
-        if workflow.workflow_id in self.app_state.active_workflows:
+        if self.context.workflow_id in self.app_state.active_workflows:
             self.app_state.completed_workflows.append(
-                self.app_state.active_workflows.pop(workflow.workflow_id)
+                self.app_state.active_workflows.pop(self.context.workflow_id)
             )
         
         # Generate completion message
@@ -883,6 +1027,10 @@ class OnboardingWorkflow:
             if answered_keys:
                 return f"So far, I have your settings for: {', '.join(answered_keys)}."
         return "No preferences have been saved yet."
+
+    def is_completed(self) -> bool:
+        """Checks if the onboarding workflow is complete based on its context status."""
+        return self.context.status == "completed"
 
 def get_active_onboarding_workflow(app_state: AppState, user_id: str) -> Optional[WorkflowContext]:
     """Gets the active onboarding workflow for a user, if any."""

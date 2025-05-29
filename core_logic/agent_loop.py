@@ -616,7 +616,7 @@ async def start_streaming_response(
                 extra={"event_type": "general_agent_history_preparation_start", "details": {"message_count": len(app_state.messages)}}
             )
             current_llm_history, history_errors = prepare_messages_for_llm_from_appstate(
-                app_state, config_max_history_items=config.MAX_HISTORY_MESSAGES
+                app_state, config_max_history_items=config.LLM_MAX_HISTORY_ITEMS
             )
             log.debug(
                 "History prepared for LLM.",

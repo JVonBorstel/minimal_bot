@@ -52,6 +52,9 @@ from core_logic import start_streaming_response, HistoryResetRequiredError
 # Import enhanced bot handler for safe message processing
 from bot_core.enhanced_bot_handler import EnhancedBotHandler
 
+# Import conversation context manager for graceful error handling
+from bot_core.conversation_context_manager import ConversationContextManager, ErrorCategory
+
 # Import user authentication utilities
 from user_auth.utils import get_current_user_profile # Added
 from user_auth.models import UserProfile # Added
@@ -733,15 +736,33 @@ class SQLiteStorage:
 
 
 class MyBot(ActivityHandler):
-    def __init__(self, app_config: Config):
+    def __init__(self, app_config: Config, tool_executor: Optional['ToolExecutor'] = None, llm_interface: Optional['LLMInterface'] = None):
         logger.info("Initializing MyBot...")
         self.app_config = app_config
-        self.llm_interface = LLMInterface(app_config)
-        self.tool_executor = ToolExecutor(app_config) # Initialize ToolExecutor
+        
+        # Use provided llm_interface or create new one if not provided
+        if llm_interface:
+            self.llm_interface = llm_interface
+            logger.debug("MyBot: Using provided LLMInterface instance")
+        else:
+            self.llm_interface = LLMInterface(app_config)
+            logger.debug("MyBot: Created new LLMInterface instance")
+        
+        # Use provided tool_executor or create new one if not provided
+        if tool_executor:
+            self.tool_executor = tool_executor
+            logger.debug("MyBot: Using provided ToolExecutor instance")
+        else:
+            self.tool_executor = ToolExecutor(app_config)
+            logger.debug("MyBot: Created new ToolExecutor instance")
         
         # Initialize enhanced bot handler for safe message processing
         self.enhanced_handler = EnhancedBotHandler()
         logger.info("Enhanced bot handler initialized for safe message processing")
+        
+        # Initialize conversation context manager for graceful error handling
+        self.context_manager = ConversationContextManager()
+        logger.info("Conversation context manager initialized for seamless error handling")
 
         # --- Storage Initialization based on memory_type --- 
         if app_config.settings.memory_type == "redis" and RedisStorage:
@@ -999,7 +1020,13 @@ class MyBot(ActivityHandler):
     async def on_members_added_activity(
         self, members_added: List[ChannelAccount], turn_context: TurnContext
     ):
-        logger.info("on_members_added_activity called.")
+        logger.info("on_members_added_activity in MyBot called - SKIPPING welcome message to avoid duplication with Orchestrator")
+        # Do nothing - the Orchestrator will handle all welcome messages
+        # We need to completely skip this to avoid duplicate welcomes
+        return
+
+        # Original code commented out below
+        '''
         app_state: AppState = await self._get_conversation_data(
             turn_context
         )  # Load state to ensure it's initialized
@@ -1034,6 +1061,7 @@ class MyBot(ActivityHandler):
                     content=f"Welcomed new member: {member.name}"
                 )
                 logger.info("Welcomed new member", extra={"event_type": "member_added", "details": {"member_name": member.name, "activity_id": turn_context.activity.id}})
+        '''
 
     async def on_message_activity(self, turn_context: TurnContext):
         activity_user_id = turn_context.activity.from_property.id if turn_context.activity.from_property else "unknown_user"
@@ -1056,6 +1084,30 @@ class MyBot(ActivityHandler):
         )
         interaction_start_time = time.monotonic()  # Record start
         app_state: AppState = await self._get_conversation_data(turn_context)
+        
+        # Track user message with conversation context manager
+        user_message = turn_context.activity.text or ""
+        context_info = self.context_manager.track_user_message(user_message)
+        
+        # Check if we should acknowledge any difficulties
+        if context_info.get("should_acknowledge_difficulty"):
+            recovery_msg = self.context_manager.suggest_recovery_action()
+            if recovery_msg:
+                await turn_context.send_activity(MessageFactory.text(recovery_msg))
+        
+        # Log conversation context
+        logger_msg_activity.debug(
+            "Conversation context analyzed",
+            extra={
+                "event_type": "conversation_context",
+                "details": {
+                    "frustration_level": context_info.get("frustration_level", 0),
+                    "conversation_state": context_info.get("conversation_state"),
+                    "momentum": context_info.get("momentum", 1.0),
+                    "patterns": context_info.get("detected_patterns", [])
+                }
+            }
+        )
 
         # --- Start: Integrate User Authentication (P3A.4.1) ---
         try:
@@ -1096,6 +1148,24 @@ class MyBot(ActivityHandler):
                     if not hasattr(app_state, 'meta_flags') or app_state.meta_flags is None:
                         app_state.meta_flags = {}
                     
+                    if hasattr(app_state, 'meta_flags') and app_state.meta_flags and app_state.meta_flags.get("pending_onboarding_decision"):
+                        # logger_msg_activity.info(f"Processing pending onboarding decision for user {user_profile.user_id}. User response: '{user_text_lower}'", extra={"event_type": "onboarding_decision_processing"})
+                        # app_state.meta_flags["pending_onboarding_decision"] = False # Clear flag immediately
+
+                        # === START OF DEPRECATED ONBOARDING STRING MATCHING (MOVED TO ORCHESTRATOR) ===
+                        # This entire block for user_text_lower checks ("start onboarding", "skip for now", rejection list) is deprecated.
+                        # The orchestrator will handle these intents.
+                        # if user_text_lower == "start onboarding":
+                        #     ...
+                        # elif user_text_lower == "skip onboarding for now":
+                        #     ...
+                        # elif user_text_lower in ["later", ...]:
+                        #     ...
+                        # else:
+                        #     logger_msg_activity.info(f"User {user_profile.user_id} sent other message while onboarding decision pending: '{user_text_lower}'. Orchestrator should handle this or clear flag.", extra={"event_type": "onboarding_decision_other_message_orchestrator_responsibility"})
+                        # === END OF DEPRECATED ONBOARDING STRING MATCHING ===
+                        pass # Ensure block is not empty if all original code is commented
+
                     if app_state.meta_flags.get("pending_onboarding_decision"):
                         logger_msg_activity.info(f"Processing pending onboarding decision for user {user_profile.user_id}. User response: '{user_text_lower}'", extra={"event_type": "onboarding_decision_processing"})
                         app_state.meta_flags["pending_onboarding_decision"] = False # Clear flag immediately
@@ -1450,44 +1520,44 @@ class MyBot(ActivityHandler):
         activity_text_lower = turn_context.activity.text.lower().strip() if turn_context.activity.text else "" 
         command_handled = False
 
-        # --- START: Handle @bot reset chat command ---
-        if activity_text_lower == "@bot reset chat":
-            command_handled = True
-            logger_msg_activity.info(f"User {app_state.current_user.user_id if app_state.current_user else 'unknown'} initiated chat reset.",
-                                     extra={"event_type": "chat_reset_initiated"})
-            
-            # Preserve session_id and current_user (if any)
-            original_session_id = app_state.session_id
-            original_current_user = app_state.current_user # This is a UserProfile object or None
-            
-            # Create a new, fresh AppState
-            app_state = self.AppStateModel(
-                session_id=original_session_id,
-                # Initialize with defaults from app_config
-                selected_model=self.app_config.GEMINI_MODEL,
-                available_personas=getattr(self.app_config, "AVAILABLE_PERSONAS", ["Default"]),
-                selected_persona=getattr(self.app_config, "DEFAULT_PERSONA", "Default"),
-                selected_perplexity_model=getattr(self.app_config, "PERPLEXITY_MODEL", "sonar-pro")
-            )
-            # Restore current_user if it existed
-            if original_current_user:
-                app_state.current_user = original_current_user
-                # If user profile exists, re-trigger onboarding check criteria
-                # This will make the bot offer onboarding if criteria are met after reset
-                logger_msg_activity.info(f"Restored user profile for {original_current_user.user_id} after chat reset.")
-
-            app_state.add_message(role="system", content="Chat history has been reset by the user.")
-            
-            # Save the reset state
-            await self.convo_state_accessor.set(turn_context, app_state)
-            await self.conversation_state.save_changes(turn_context, force=True) # Force save
-            
-            await turn_context.send_activity(MessageFactory.text("🔄 The chat history has been reset. How can I help you now?"))
-            
-            logger_msg_activity.info(f"Chat successfully reset for session {original_session_id}.",
-                                     extra={"event_type": "chat_reset_completed"})
-            return # Important: End processing for this turn
-        # --- END: Handle @bot reset chat command ---
+        # --- START: DEPRECATED @bot reset chat command (MOVED TO ORCHESTRATOR) ---
+        # if activity_text_lower == "@bot reset chat":
+        #     command_handled = True
+        #     logger_msg_activity.info(f"User {app_state.current_user.user_id if app_state.current_user else 'unknown'} initiated chat reset (DEPRECATED PATH IN MyBot).",
+        #                              extra={"event_type": "chat_reset_initiated_deprecated"})
+        #     
+        #     # Preserve session_id and current_user (if any)
+        #     original_session_id = app_state.session_id
+        #     original_current_user = app_state.current_user # This is a UserProfile object or None
+        #     
+        #     # Create a new, fresh AppState
+        #     app_state = self.AppStateModel(
+        #         session_id=original_session_id,
+        #         # Initialize with defaults from app_config
+        #         selected_model=self.app_config.GEMINI_MODEL,
+        #         available_personas=getattr(self.app_config, "AVAILABLE_PERSONAS", ["Default"]),
+        #         selected_persona=getattr(self.app_config, "DEFAULT_PERSONA", "Default"),
+        #         selected_perplexity_model=getattr(self.app_config, "PERPLEXITY_MODEL", "sonar-pro")
+        #     )
+        #     # Restore current_user if it existed
+        #     if original_current_user:
+        #         app_state.current_user = original_current_user
+        #         # If user profile exists, re-trigger onboarding check criteria
+        #         # This will make the bot offer onboarding if criteria are met after reset
+        #         logger_msg_activity.info(f"Restored user profile for {original_current_user.user_id} after chat reset (DEPRECATED PATH IN MyBot).")
+        #
+        #     app_state.add_message(role="system", content="Chat history has been reset by the user.")
+        #     
+        #     # Save the reset state
+        #     await self.convo_state_accessor.set(turn_context, app_state)
+        #     await self.conversation_state.save_changes(turn_context, force=True) # Force save
+        #     
+        #     await turn_context.send_activity(MessageFactory.text("🔄 The chat history has been reset. How can I help you now?"))
+        #     
+        #     logger_msg_activity.info(f"Chat successfully reset for session {original_session_id} (DEPRECATED PATH IN MyBot).",
+        #                              extra={"event_type": "chat_reset_completed_deprecated"})
+        #     return # Important: End processing for this turn
+        # --- END: DEPRECATED @bot reset chat command ---
 
         # --- Helper function for P3A.5.1: Get available tools based on user permissions (already defined above) ---
         # def get_available_tools_for_user() -> Dict[str, List[Dict[str, str]]]: ...
@@ -1507,73 +1577,79 @@ class MyBot(ActivityHandler):
             return {}
 
         if not user_is_onboarding: # Only show general help if not in active onboarding
-            if activity_text_lower in ["help", "@bot help", "@bot what can you do", "@bot commands"]:
-                command_handled = True
-                available_tools = get_available_tools_for_user() # Ensure this function is accessible or defined earlier
-                help_text_lines = [
-                    "I'm your ChatOps assistant. Here's what I can help with based on your access level:",
-                    "",
-                    "Basic Commands:",
-                    "- `@bot help` or `@bot what can you do` - Display this help message.",
-                    "- `@bot my role` or `@bot my permissions` - See your current role and permissions.",
-                ]
-                if available_tools:
-                    help_text_lines.append("")
-                    help_text_lines.append("Available Tool Categories & Commands:")
-                    for category, tools_in_category in available_tools.items():
-                        help_text_lines.append(f"\n**{category}**:")
-                        for tool_info in tools_in_category:
-                            help_text_lines.append(f"- `{tool_info['name']}`: {tool_info['description']}")
-                else:
-                    help_text_lines.append("\nCurrently, I don't have specific tools available to list for your role, or tool loading failed.")
+            # === START OF DEPRECATED HELP COMMAND (MOVED TO ORCHESTRATOR) ===
+            # if activity_text_lower in ["help", "@bot help", "@bot what can you do", "@bot commands"]:
+            #     command_handled = True
+            #     available_tools = get_available_tools_for_user() # Ensure this function is accessible or defined earlier
+            #     help_text_lines = [
+            #         "I'm your ChatOps assistant. Here's what I can help with based on your access level:",
+            #         "",
+            #         "Basic Commands:",
+            #         "- `@bot help` or `@bot what can you do` - Display this help message.",
+            #         "- `@bot my role` or `@bot my permissions` - See your current role and permissions.",
+            #     ]
+            #     if available_tools:
+            #         help_text_lines.append("")
+            #         help_text_lines.append("Available Tool Categories & Commands:")
+            #         for category, tools_in_category in available_tools.items():
+            #             help_text_lines.append(f"\n**{category}**:")
+            #             for tool_info in tools_in_category:
+            #                 help_text_lines.append(f"- `{tool_info['name']}`: {tool_info['description']}")
+            #     else:
+            #         help_text_lines.append("\nCurrently, I don't have specific tools available to list for your role, or tool loading failed.")
 
-                if app_state.current_user and app_state.has_permission(Permission.MANAGE_USER_ROLES):
-                    help_text_lines.append("")
-                    help_text_lines.append("**Admin Commands:**")
-                    help_text_lines.append("- `@bot admin view permissions for <user_id>` - View another user's permissions.")
-                
-                await turn_context.send_activity(MessageFactory.text("\n".join(help_text_lines)))
-                logger_msg_activity.info(
-                    f"User requested help. Displayed help with {len(available_tools)} tool categories.",
-                    extra={
-                        "event_type": "command_executed",
-                        "details": {
-                            "command": "help",
-                            "user_id": app_state.current_user.user_id if app_state.current_user else "unknown",
-                            "role": app_state.current_user.assigned_role if app_state.current_user else "none",
-                            "tool_categories": list(available_tools.keys()) if available_tools else []
-                        }
-                    }
-                )
+            #     if app_state.current_user and app_state.has_permission(Permission.MANAGE_USER_ROLES):
+            #         help_text_lines.append("")
+            #         help_text_lines.append("**Admin Commands:**")
+            #         help_text_lines.append("- `@bot admin view permissions for <user_id>` - View another user's permissions.")
+            #     
+            #     await turn_context.send_activity(MessageFactory.text("\n".join(help_text_lines)))
+            #     logger_msg_activity.info(
+            #         f"User requested help. Displayed help with {len(available_tools)} tool categories (DEPRECATED PATH IN MyBot).",
+            #         extra={
+            #             "event_type": "command_executed_deprecated",
+            #             "details": {
+            #                 "command": "help",
+            #                 "user_id": app_state.current_user.user_id if app_state.current_user else "unknown",
+            #                 "role": app_state.current_user.assigned_role if app_state.current_user else "none",
+            #                 "tool_categories": list(available_tools.keys()) if available_tools else []
+            #             }
+            #         }
+            #     )
+            # === END OF DEPRECATED HELP COMMAND ===
+            pass # Ensure block is not empty if all original code is commented
                 
             # Command 1: @Bot my permissions / @Bot my role
-            if activity_text_lower == "@bot my permissions" or activity_text_lower == "@bot my role":
-                command_handled = True
-                if app_state.current_user:
-                    role_name = app_state.current_user.assigned_role
-                    # Use app_state.permission_manager to get effective permissions
-                    effective_permissions = app_state.permission_manager.get_effective_permissions(app_state.current_user)
-                    perm_names = sorted([p.name for p in effective_permissions])
-                    
-                    response_md = f"Your assigned role is: **{role_name}**.\n\n"
-                    if perm_names:
-                        response_md += "Your effective permissions include:\n"
-                        for p_name in perm_names:
-                            response_md += f"- `{p_name}`\n"
-                    else:
-                        response_md += "You have the basic permissions associated with your role."
-                    
-                    await turn_context.send_activity(MessageFactory.text(response_md))
-                    logger_msg_activity.info(
-                        f"User '{app_state.current_user.user_id}' executed 'my permissions' command.",
-                        extra={"event_type": "command_executed", "details": {"command": "my_permissions"}}
-                    )
-                else:
-                    await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to check your permissions."))
-                    logger_msg_activity.warning(
-                        "User tried 'my permissions' command but current_user is None.",
-                        extra={"event_type": "command_failed", "details": {"command": "my_permissions", "reason": "User not identified"}}
-                    )
+            # === START OF DEPRECATED MY PERMISSIONS/ROLE COMMAND (MOVED TO ORCHESTRATOR) ===
+            # if activity_text_lower == "@bot my permissions" or activity_text_lower == "@bot my role":
+            #     command_handled = True
+            #     if app_state.current_user:
+            #         role_name = app_state.current_user.assigned_role
+            #         # Use app_state.permission_manager to get effective permissions
+            #         effective_permissions = app_state.permission_manager.get_effective_permissions(app_state.current_user)
+            #         perm_names = sorted([p.name for p in effective_permissions])
+            #         
+            #         response_md = f"Your assigned role is: **{role_name}**.\n\n"
+            #         if perm_names:
+            #             response_md += "Your effective permissions include:\n"
+            #             for p_name in perm_names:
+            #                 response_md += f"- `{p_name}`\n"
+            #         else:
+            #             response_md += "You have the basic permissions associated with your role."
+            #         
+            #         await turn_context.send_activity(MessageFactory.text(response_md))
+            #         logger_msg_activity.info(
+            #             f"User '{app_state.current_user.user_id}' executed 'my permissions' command (DEPRECATED PATH IN MyBot).",
+            #             extra={"event_type": "command_executed_deprecated", "details": {"command": "my_permissions"}}
+            #         )
+            #     else:
+            #         await turn_context.send_activity(MessageFactory.text("Sorry, I couldn't identify you to check your permissions."))
+            #         logger_msg_activity.warning(
+            #             "User tried 'my permissions' command but current_user is None (DEPRECATED PATH IN MyBot).",
+            #             extra={"event_type": "command_failed_deprecated", "details": {"command": "my_permissions", "reason": "User not identified"}}
+            #         )
+            # === END OF DEPRECATED MY PERMISSIONS/ROLE COMMAND ===
+            pass # Ensure block is not empty if all original code is commented
             
             # Command 2: @Bot admin view role for <user_id> / @Bot admin view permissions for <user_id>
             # Using a simple regex to capture the user_id
@@ -1702,9 +1778,13 @@ class MyBot(ActivityHandler):
         if not success:
             # Enhanced handler detected an issue with the message
             logger_msg_activity.error(f"Enhanced handler rejected user input: {result}")
-            await turn_context.send_activity(MessageFactory.text(
-                f"I'm sorry, but I encountered an issue processing your message: {result}"
-            ))
+            # Use context manager for graceful error handling
+            error_msg = self.context_manager.handle_error(
+                Exception(result),
+                ErrorCategory.UNDERSTANDING,
+                {"error_type": "message_processing", "user_message": user_message}
+            )
+            await turn_context.send_activity(MessageFactory.text(error_msg))
             # Save state and return early
             await self.conversation_state.save_changes(turn_context)
             await self.user_state.save_changes(turn_context)
@@ -1966,7 +2046,32 @@ class MyBot(ActivityHandler):
                     last_activity_id_to_update = None
 
                 elif event_type == "error":
-                    error_display_msg = f"🚨 Error: {event_content}"
+                    # Use context manager for graceful error handling
+                    error_code = event_content.get("code", "UNKNOWN_ERROR") if isinstance(event_content, dict) else "UNKNOWN_ERROR"
+                    error_details = event_content.get("content", str(event_content)) if isinstance(event_content, dict) else str(event_content)
+                    
+                    # Map error codes to categories
+                    error_category = ErrorCategory.TECHNICAL  # Default
+                    if error_code == "API_TIMEOUT":
+                        error_category = ErrorCategory.API_TIMEOUT
+                    elif error_code == "API_SERVICE_UNAVAILABLE":
+                        error_category = ErrorCategory.NETWORK
+                    elif error_code == "API_RATE_LIMIT":
+                        error_category = ErrorCategory.API_TIMEOUT
+                    elif error_code == "NO_VALID_MESSAGES":
+                        error_category = ErrorCategory.UNDERSTANDING
+                    elif "PERMISSION" in error_code:
+                        error_category = ErrorCategory.PERMISSION
+                    elif "TOOL" in error_code:
+                        error_category = ErrorCategory.TOOL_FAILURE
+                    
+                    # Generate graceful error message
+                    error_display_msg = self.context_manager.handle_error(
+                        Exception(error_details),
+                        error_category,
+                        {"error_code": error_code, "user_message": user_message}
+                    )
+                    
                     logger_msg_activity.error("Error event received from stream.", extra={"event_type": "stream_error_event", "details": {"error_content": event_content}})
                     
                     # CRITICAL FIX: Reset is_streaming on error to prevent getting stuck
@@ -2010,10 +2115,11 @@ class MyBot(ActivityHandler):
                 exc_info=True,
                 extra={"event_type": "history_reset_required_error", "details": {"error_message": str(e)}}
             )
-            reset_message = (
-                "🔄 My apologies, I had a problem with our conversation "
-                "history and had to reset it. Please try your request "
-                f"again. (Details: {e})"
+            # Use context manager for graceful error handling
+            reset_message = self.context_manager.handle_error(
+                e,
+                ErrorCategory.TECHNICAL,
+                {"error_type": "history_reset", "user_message": user_message}
             )
             await turn_context.send_activity(MessageFactory.text(reset_message))
             final_bot_message_sent = True
@@ -2026,19 +2132,24 @@ class MyBot(ActivityHandler):
                 exc_info=True,
                 extra={"event_type": "unhandled_stream_exception"}
             )
-            error_message = "Sorry, an unexpected error occurred while I was processing your request."
+            # Use context manager for graceful error handling
+            error_message = self.context_manager.handle_error(
+                e,
+                ErrorCategory.TECHNICAL,
+                {"error_type": "unhandled_exception", "user_message": user_message}
+            )
             try:
                 if last_activity_id_to_update and not "".join(accumulated_text_response).strip():
                     try:
-                        await turn_context.update_activity(Activity(id=last_activity_id_to_update, type=ActivityTypes.message, text=f"🚨 {error_message}"))
+                        await turn_context.update_activity(Activity(id=last_activity_id_to_update, type=ActivityTypes.message, text=error_message))
                         final_bot_message_sent = True
                     except Exception as update_error:
                         logger_msg_activity.warning("Failed to update activity with unhandled error message, sending new.", exc_info=True, extra={"event_type": "activity_update_failed", "details": {"session_id": app_state.session_id, "activity_id": last_activity_id_to_update, "error": str(update_error)}})
-                        await turn_context.send_activity(f"🚨 {error_message}")
+                        await turn_context.send_activity(error_message)
                         final_bot_message_sent = True
                     last_activity_id_to_update = None
                 else:
-                    await turn_context.send_activity(f"🚨 {error_message}")
+                    await turn_context.send_activity(error_message)
                     final_bot_message_sent = True
             except Exception as send_err:
                 logger_msg_activity.error("Failed to send unhandled error message to user.", exc_info=True, extra={"event_type": "send_error_message_failed"})
@@ -2079,20 +2190,30 @@ class MyBot(ActivityHandler):
         placeholder_updated = final_bot_message_sent and last_activity_id_to_update is not None
 
         if final_text_to_send and not placeholder_updated:
-            await turn_context.send_activity(MessageFactory.text(final_text_to_send))
-            final_bot_message_sent = True
-            logger_msg_activity.info("Sent final text response as a new message activity.", extra={"event_type": "final_text_sent_new_message"})
+            # Track with context manager before sending
+            if self.context_manager.track_bot_response(final_text_to_send):
+                await turn_context.send_activity(MessageFactory.text(final_text_to_send))
+                final_bot_message_sent = True
+                logger_msg_activity.info("Sent final text response as a new message activity.", extra={"event_type": "final_text_sent_new_message"})
+            else:
+                logger_msg_activity.warning("Skipped duplicate response", extra={"event_type": "duplicate_response_blocked"})
         elif not final_text_to_send and not final_bot_message_sent:
             current_status = getattr(app_state, "last_interaction_status", "")
             if current_status not in ["ERROR", "FATAL_ERROR", "HISTORY_RESET", "WAITING_USER_INPUT"]:
-                await turn_context.send_activity(MessageFactory.text("✅ Processed."))
-                logger_msg_activity.info("Sent generic completion message.", extra={"event_type": "generic_completion_sent"})
-                final_bot_message_sent = True
+                generic_msg = "✅ Processed."
+                if self.context_manager.track_bot_response(generic_msg):
+                    await turn_context.send_activity(MessageFactory.text(generic_msg))
+                    logger_msg_activity.info("Sent generic completion message.", extra={"event_type": "generic_completion_sent"})
+                    final_bot_message_sent = True
 
         if final_text_to_send and placeholder_updated and last_activity_id_to_update is not None:
-            await turn_context.send_activity(MessageFactory.text(final_text_to_send))
-            logger_msg_activity.info("Force-sent final response as a new message activity (bugfix).", extra={"event_type": "final_text_force_sent_new_message"})
-            final_bot_message_sent = True
+            # Track with context manager before sending
+            if self.context_manager.track_bot_response(final_text_to_send):
+                await turn_context.send_activity(MessageFactory.text(final_text_to_send))
+                logger_msg_activity.info("Force-sent final response as a new message activity (bugfix).", extra={"event_type": "final_text_force_sent_new_message"})
+                final_bot_message_sent = True
+            else:
+                logger_msg_activity.warning("Skipped duplicate force-send response", extra={"event_type": "duplicate_force_response_blocked"})
 
         if hasattr(app_state, "session_stats") and app_state.session_stats is not None:
             logger.info( # This is the existing summary log, keep it as is or integrate with JSON if preferred

@@ -20,11 +20,14 @@ from pydantic import (
 
 # Try to import BaseSettings, fall back to BaseModel if not available
 try:
-    from pydantic_settings import BaseSettings
+    from pydantic_settings import BaseSettings, SettingsConfigDict
 except ImportError:
     # Fallback for older pydantic versions or missing pydantic-settings
     BaseSettings = BaseModel
     print("Warning: pydantic-settings not found. Environment variable loading may not work properly.")
+    # Define a dummy SettingsConfigDict for compatibility if pydantic-settings is missing
+    class SettingsConfigDict:
+        pass 
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +214,13 @@ DEFAULT_SYSTEM_PROMPT = """You are Aughie, an intelligent and adaptive ChatOps a
    - Urgency and importance of requests
    - User expertise level and role
 
-4. **Tool Usage Intelligence**: When users need help with tasks:
+4. **Tool Usage Intelligence**: 
+   **CRITICAL: When you have tools available that can help answer a user's question or request, YOU MUST USE THEM.**
+   - If a user asks about current events, news, or anything requiring real-time information, USE the perplexity_web_search tool
+   - If a user asks about code in repositories, USE the github or greptile tools
+   - If a user asks about tickets or project management, USE the jira tools
+   - NEVER say "I don't have access to real-time information" when you have perplexity tools available
+   - NEVER tell users to search elsewhere when you have tools that can do the search for them
    - Analyze the request to understand the underlying goal
    - Determine which tools and approaches are most appropriate
    - Plan multi-step solutions when needed
@@ -273,7 +282,7 @@ Instead of rigid help commands, understand help requests from:
 - "I'm lost, what are my options?"
 - "How does this work?"
 
-**Your Goal**: Be an intelligent, adaptive assistant that understands users naturally and helps them accomplish their goals efficiently, regardless of how they express themselves. Use your language understanding capabilities to make conversations feel natural and intelligent, not scripted or robotic."""
+**Your Goal**: Be an intelligent, adaptive assistant that understands users naturally and helps them accomplish their goals efficiently, regardless of how they express themselves. Use your language understanding capabilities to make conversations feel natural and intelligent, not scripted or robotic. ALWAYS use available tools to answer questions instead of saying you can't access information."""
 
 class AppSettings(BaseSettings):
     app_env: Literal["development", "production"] = Field("development", alias="APP_ENV")
@@ -327,6 +336,19 @@ class AppSettings(BaseSettings):
     log_llm_interaction: bool = Field(False, alias="LOG_LLM_INTERACTION") # For full prompts/responses
     log_tool_io: bool = Field(False, alias="LOG_TOOL_IO") # For full tool inputs/outputs
 
+    # Tool System configurations (previously constants or hardcoded in Config properties)
+    max_function_declarations_for_llm: int = Field(12, alias="MAX_FUNCTION_DECLARATIONS_FOR_LLM", description="Max number of tool function declarations to send to LLM.")
+    
+    tool_selector_enabled: bool = Field(True, alias="TOOL_SELECTOR_ENABLED")
+    tool_selector_similarity_threshold: float = Field(0.1, alias="TOOL_SELECTOR_SIMILARITY_THRESHOLD")
+    tool_selector_max_tools: int = Field(15, alias="TOOL_SELECTOR_MAX_TOOLS")
+    # tool_selector_always_include_tools: List[str] = Field(default_factory=list, alias="TOOL_SELECTOR_ALWAYS_INCLUDE") # Example if needed
+    tool_selector_debug_logging: bool = Field(True, alias="TOOL_SELECTOR_DEBUG_LOGGING")
+    tool_selector_default_fallback: bool = Field(True, alias="TOOL_SELECTOR_DEFAULT_FALLBACK")
+    tool_selector_embedding_model: str = Field("all-MiniLM-L6-v2", alias="TOOL_SELECTOR_EMBEDDING_MODEL")
+    # Cache path might still be constructed, but could be based on a configurable base data directory if needed
+    # For now, constructed path is in Config.TOOL_SELECTOR property, which is fine.
+
     # Validators remain the same, omitted for brevity
     @field_validator('jira_api_token', 'jira_api_email', 'jira_api_url', mode='before')
     def _ensure_jira_fields_not_empty_if_provided(cls, v: Optional[Any], info: Any) -> Optional[Any]:
@@ -352,12 +374,27 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode='after')
     def check_github_default_account(self) -> 'AppSettings':
+        """
+        Validates GitHub account configuration.
+        More lenient during development to allow testing with expired tokens.
+        """
         if self.github_default_account_name and self.github_accounts:
             account_names = {acc.name for acc in self.github_accounts}
             if self.github_default_account_name not in account_names:
                 raise ValueError(f"Invalid GITHUB_DEFAULT_ACCOUNT_NAME ('{self.github_default_account_name}'). Does not match: {list(account_names)}")
         elif self.github_default_account_name and not self.github_accounts:
-             raise ValueError("GITHUB_DEFAULT_ACCOUNT_NAME is set, but no GitHub accounts are configured.")
+            # Check if we're in a development/testing environment
+            is_development = self.app_env == "development" or os.getenv("TESTING") == "true"
+            
+            if is_development:
+                # In development, warn but don't fail - allows testing with expired tokens
+                log.warning(f"GITHUB_DEFAULT_ACCOUNT_NAME is set to '{self.github_default_account_name}' but no valid GitHub accounts are configured. This is acceptable in development mode.")
+                log.warning("For production deployment, ensure GITHUB_ACCOUNT_1_TOKEN and GITHUB_ACCOUNT_1_NAME are properly set.")
+                # Clear the default account name to prevent runtime issues
+                self.github_default_account_name = None
+            else:
+                # In production, this is a real error
+                raise ValueError("GITHUB_DEFAULT_ACCOUNT_NAME is set, but no GitHub accounts are configured. Please verify GITHUB_ACCOUNT_1_TOKEN and GITHUB_ACCOUNT_1_NAME environment variables.")
         return self
 
     state_db_path: str = Field("db/state.sqlite", alias="STATE_DB_PATH")
@@ -439,129 +476,120 @@ class AppSettings(BaseSettings):
             elif not self.redis_host: raise ValueError("REDIS_HOST must be set if REDIS_URL is not provided and memory_type is 'redis'.")
         return self
 
-    model_config = ConfigDict(
+    # Updated model_config for Pydantic V2 BaseSettings
+    model_config = SettingsConfigDict(
+        env_file=find_dotenv(), # Automatically find and load .env
         env_file_encoding='utf-8',
         extra='ignore',
-        # Enable environment variable loading for BaseSettings
-        env_prefix='',
+        # env_prefix='', # No prefix needed if variables are directly named
         case_sensitive=False,
-        validate_default=True,
+        # validate_default=True, # validate_by_default in Pydantic V2 SettingsConfigDict
+        validate_by_default=True,
         use_enum_values=True
     )
 
     def get_env_value(self, env_name: str) -> Optional[str]:
-        # Ensure settings are loaded if accessed directly before full __init__ (less common)
-        if not hasattr(self, 'settings') and hasattr(self, '_config_instance') and self._config_instance is not None and hasattr(self._config_instance, 'settings'):
-             self.settings = self._config_instance.settings
+        # This method is now largely superseded by direct attribute access on the AppSettings instance.
+        # Pydantic BaseSettings automatically handles loading from env vars based on field names/aliases.
+        # This method could be kept for specific introspection cases or gradually deprecated.
+        log.debug(f"AppSettings.get_env_value called for: {env_name}. Consider direct attribute access.")
         
-        if hasattr(self, 'settings'):
-            field_name = None
-            # Check Pydantic field aliases first
-            for name, field_info in self.settings.model_fields.items():
-                if hasattr(field_info, 'alias') and field_info.alias == env_name:
-                    field_name = name
+        field_name_to_check = None
+        # Check Pydantic field aliases first, then direct attribute names
+        for name, field_info in self.model_fields.items():
+            if field_info.alias == env_name:
+                field_name_to_check = name
+                break
+        if not field_name_to_check:
+            for name in self.model_fields.keys():
+                if name.lower() == env_name.lower(): # Case-insensitive check for env_name mapping
+                    field_name_to_check = name
                     break
-            
-            # If not found by alias, check direct attribute name (case-insensitive for env var style)
-            if not field_name:
-                for name in self.settings.model_fields.keys():
-                    if name.lower() == env_name.lower():
-                        field_name = name
-                        break
-            
-            if field_name and hasattr(self.settings, field_name):
-                setting_value = getattr(self.settings, field_name)
-                if setting_value is not None:
-                    # For lists (like github_accounts), consider it "set" if the list is not empty
-                    if isinstance(setting_value, list):
-                        return str(len(setting_value)) if setting_value else None 
-                    # For Pydantic models or other complex types, __str__ might be too verbose or not indicative of "set"
-                    # For HttpUrl etc., str(setting_value) is fine.
-                    elif hasattr(setting_value, '__str__') and isinstance(setting_value, (str, int, float, bool, HttpUrl, EmailStr)):
-                         return str(setting_value)
-                    elif isinstance(setting_value, (str, int, float, bool)): # Basic types already covered but good fallback
-                        return str(setting_value)
-                    # If it's a complex object not covered above, and we just need to check existence,
-                    # its presence means it's "set". Returning a placeholder.
-                    return "OBJECT_PRESENT" 
         
-        # Fallback to direct os.environ.get if not found in Pydantic settings
-        # This is less common if all configs are routed via AppSettings
+        if field_name_to_check and hasattr(self, field_name_to_check):
+            setting_value = getattr(self, field_name_to_check)
+            if setting_value is not None:
+                if isinstance(setting_value, list):
+                    return str(len(setting_value)) if setting_value else None 
+                elif hasattr(setting_value, '__str__') and isinstance(setting_value, (str, int, float, bool, HttpUrl, EmailStr)):
+                     return str(setting_value)
+                elif isinstance(setting_value, (str, int, float, bool)):
+                    return str(setting_value)
+                return "OBJECT_PRESENT"
+        
+        # Fallback to os.environ.get if not found as a Pydantic field 
+        # (should be rare if all settings are modeled).
         direct_value = os.environ.get(env_name)
         if direct_value is not None:
-            log.debug(f"Env var {env_name} found directly in os.environ (value: '{direct_value[:20]}...').")
+            # log.debug(f"Env var {env_name} found directly in os.environ (value: '{direct_value[:20]}...'), not as a Pydantic field.")
             return direct_value
-        
-        # log.debug(f"Env var or Pydantic setting {env_name} not found or has no value.")
         return None
 
     def is_tool_configured(self, tool_name: str, categories: Optional[List[str]] = None) -> bool:
         tool_name_lower = tool_name.lower()
-        if not hasattr(self, '_tool_validation_cache'):
-            self._tool_validation_cache = {}
+        # Cache should be on the instance of AppSettings
+        if not hasattr(self, '_tool_validation_cache_local'): # Use a different cache name to avoid conflict if Config had one
+            self._tool_validation_cache_local = {}
         
-        cache_key = tool_name_lower # Simple cache key for now
-        if cache_key in self._tool_validation_cache:
-            return self._tool_validation_cache[cache_key]
+        cache_key = tool_name_lower 
+        if cache_key in self._tool_validation_cache_local:
+            return self._tool_validation_cache_local[cache_key]
 
-        if not hasattr(self, '_tool_health_status'):
-            self._tool_health_status = {}
+        # Health status integration (placeholder, assuming health status might be stored elsewhere or passed in)
+        # For now, this check is removed as _tool_health_status isn't part of AppSettings directly.
+        # if hasattr(self, '_tool_health_status') and self._tool_health_status.get(tool_name_lower) == 'DOWN':
+        #     log.warning(f"Tool '{tool_name}' marked DOWN. Considering NOT configured.")
+        #     self._tool_validation_cache_local[cache_key] = False
+        #     return False
 
-        if tool_name_lower in self._tool_health_status and self._tool_health_status[tool_name_lower] == 'DOWN':
-            log.warning(f"Tool '{tool_name}' marked DOWN by health check. Considering NOT configured.")
-            self._tool_validation_cache[cache_key] = False
-            return False
-
-        is_configured = False # Default to False
+        is_configured = False 
         processed_categories = [cat.lower() for cat in categories] if categories else []
 
-        # 1. GitHub specific check (due to complex structure of github_accounts)
+        # 1. GitHub specific check
         if "github" in processed_categories or "github" in tool_name_lower:
-            # Check if github_accounts is properly loaded and has valid tokens
-            github_accounts = getattr(self, 'github_accounts', [])
-            is_configured = bool(github_accounts and any(acc.token for acc in github_accounts))
-            log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) GitHub check: configured = {is_configured}, accounts = {len(github_accounts)}")
-            self._tool_validation_cache[cache_key] = is_configured
+            # Access self.github_accounts directly (it's a field in AppSettings)
+            is_configured = bool(self.github_accounts and any(acc.token for acc in self.github_accounts))
+            log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) GitHub check: configured = {is_configured}, accounts = {len(self.github_accounts)}")
+            self._tool_validation_cache_local[cache_key] = is_configured
             return is_configured
 
-        # 2. Check services defined in TOOL_CONFIG_REQUIREMENTS based on categories or tool name
+        # 2. Check services defined in TOOL_CONFIG_REQUIREMENTS
         service_to_check = None
-        for service_key in TOOL_CONFIG_REQUIREMENTS.keys(): # Access global directly
+        for service_key in TOOL_CONFIG_REQUIREMENTS.keys(): 
             if service_key in processed_categories:
                 service_to_check = service_key
                 break
-            if not service_to_check and service_key in tool_name_lower: # Fallback if category not specific
+            if not service_to_check and service_key in tool_name_lower: 
                 service_to_check = service_key
         
         if service_to_check:
-            required_vars = TOOL_CONFIG_REQUIREMENTS[service_to_check] # Access global directly
+            required_vars = TOOL_CONFIG_REQUIREMENTS[service_to_check]
             missing_vars = []
             all_found = True
-            for var_key in required_vars:
-                pydantic_attr_name = var_key.lower() # Simple conversion
-                # Assuming self.settings is the loaded AppSettings instance
-                if hasattr(self, pydantic_attr_name): # Check directly on self (AppSettings instance)
-                    if not getattr(self, pydantic_attr_name):
+            for var_key_from_global_list in required_vars:
+                # Convert VAR_KEY (e.g., JIRA_API_URL) to AppSettings field name (e.g., jira_api_url)
+                pydantic_attr_name = var_key_from_global_list.lower()
+                if hasattr(self, pydantic_attr_name):
+                    if not getattr(self, pydantic_attr_name): # Check if the attribute on self (AppSettings instance) has a value
                         all_found = False
-                        missing_vars.append(var_key)
+                        missing_vars.append(var_key_from_global_list)
                 else: 
                     all_found = False
-                    missing_vars.append(f"{var_key} (attribute not found in AppSettings)")
+                    missing_vars.append(f"{var_key_from_global_list} (attribute '{pydantic_attr_name}' not found in AppSettings)")
 
             if all_found:
                 is_configured = True
             else:
-                log.warning(f"Tool '{tool_name}' (service: {service_to_check}, categories: {processed_categories}) NOT configured. Missing Pydantic settings: {missing_vars}")
+                log.warning(f"Tool '{tool_name}' (service: {service_to_check}, categories: {processed_categories}) NOT configured. Missing required Pydantic settings on AppSettings: {missing_vars}")
             
-            log.debug(f"Tool '{tool_name}' (service: {service_to_check}) check: configured = {is_configured}")
-            self._tool_validation_cache[cache_key] = is_configured
+            log.debug(f"Tool '{tool_name}' (service: {service_to_check}) check on AppSettings: configured = {is_configured}")
+            self._tool_validation_cache_local[cache_key] = is_configured
             return is_configured
 
-        # 3. If no specific service category requiring config matched, assume it's a core/dependency-free tool.
         is_configured = True 
-        log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) did not match specific service config checks. Assuming configured (e.g., core tool). Status: {is_configured}")
+        log.debug(f"Tool '{tool_name}' (categories: {processed_categories}) did not match specific service config checks in AppSettings. Assuming configured. Status: {is_configured}")
         
-        self._tool_validation_cache[cache_key] = is_configured
+        self._tool_validation_cache_local[cache_key] = is_configured
         return is_configured
 
 
@@ -571,46 +599,39 @@ class Config:
     for accessing all application configuration values.
     """
     
-    def __init__(self, env_file: Optional[str] = None):
+    def __init__(self, env_file: Optional[str] = None): # env_file argument is largely for legacy or specific override cases now
         """
         Initialize Config by loading environment variables and validating settings.
-        
-        Args:
-            env_file: Optional path to a .env file to load
+        AppSettings (as BaseSettings) handles .env loading automatically.
         """
-        # Load environment variables from .env file if provided or found
-        if env_file:
-            load_dotenv(env_file)
-        else:
-            # Try to find a .env file in common locations
-            env_path = find_dotenv()
-            if env_path:
-                load_dotenv(env_path)
-                log.info(f"Loaded environment variables from: {env_path}")
-            else:
-                log.info("No .env file found, using system environment variables only")
+        # AppSettings (as BaseSettings with env_file=find_dotenv()) handles .env loading.
+        # Explicit load_dotenv here is mostly redundant but kept for _load_github_accounts 
+        # which runs before AppSettings is fully initialized if it needs env vars not yet seen by AppSettings.
+        # If _load_github_accounts exclusively uses os.getenv, and AppSettings loads .env first,
+        # then this explicit load_dotenv might not be strictly needed here.
+        # For this pass, we make it more targeted.
         
-        # Load GitHub account configurations from environment variables
+        # If an explicit env_file is provided for Config, load it with override. 
+        # This allows specific test .env files, for example.
+        if env_file and os.path.exists(env_file):
+            if load_dotenv(env_file, override=True):
+                log.info(f"Config explicitly loaded .env file: {env_file}")
+        # Otherwise, AppSettings will handle find_dotenv().
+        # _load_github_accounts will use os.getenv, which will see vars from .env if AppSettings loaded it,
+        # or from the environment if no .env was used by AppSettings.
+
         github_accounts = self._load_github_accounts()
         
-        # Initialize the Pydantic settings model
         try:
-            # Create a temporary dict to pass github_accounts to the model
-            # while still allowing BaseSettings to read from environment
-            extra_data = {"github_accounts": github_accounts}
-            self.settings = AppSettings(**extra_data)
-            log.info("✅ Configuration loaded successfully")
+            self.settings = AppSettings(github_accounts=github_accounts)
+            log.info("✅ AppSettings initialized within Config object.")
         except ValidationError as e:
-            log.error(f"❌ Configuration validation failed: {e}")
+            log.error(f"❌ AppSettings validation failed within Config: {e}")
             raise
         except Exception as e:
-            log.error(f"❌ Failed to initialize configuration: {e}")
+            log.error(f"❌ Failed to initialize AppSettings within Config: {e}")
             raise
         
-        # Set up computed properties
-        self._setup_computed_properties()
-        
-        # Log configuration summary
         self._log_config_summary()
     
     def _load_github_accounts(self) -> List[GitHubAccountConfig]:
@@ -651,107 +672,21 @@ class Config:
         
         return accounts
     
-    def _setup_computed_properties(self):
-        """Set up computed properties and convenience attributes."""
-        # Database path property
-        self.STATE_DB_PATH = self.settings.state_db_path
-        
-        # Core API settings
-        self.GEMINI_API_KEY = self.settings.gemini_api_key
-        self.GEMINI_MODEL = self.settings.gemini_model
-        self.DEFAULT_SYSTEM_PROMPT = self.settings.system_prompt
-        self.DEFAULT_API_TIMEOUT_SECONDS = self.settings.default_api_timeout_seconds
-        self.DEFAULT_API_MAX_RETRIES = self.settings.default_api_max_retries
-        
-        # LLM settings
-        self.LLM_MAX_HISTORY_ITEMS = self.settings.llm_max_history_items
-        self.MAX_CONSECUTIVE_TOOL_CALLS = self.settings.max_consecutive_tool_calls
-        
-        # Backward compatibility alias for MAX_HISTORY_MESSAGES
-        self.MAX_HISTORY_MESSAGES = self.settings.llm_max_history_items
-        
-        # Application settings
-        self.MOCK_MODE = self.settings.mock_mode
-        
-        # Service API settings
-        self.PERPLEXITY_API_URL = self.settings.perplexity_api_url
-        self.PERPLEXITY_MODEL = self.settings.perplexity_model
-        self.JIRA_API_EMAIL = self.settings.jira_api_email
-        
-        # Available models reference
-        self.AVAILABLE_PERPLEXITY_MODELS_REF = AVAILABLE_PERPLEXITY_MODELS_REF
-        
-        # Tool executor instance (will be set later during initialization)
-        self.tool_executor_instance = None
-        
-        # Bot Framework settings
-        self.MICROSOFT_APP_ID = self.settings.MicrosoftAppId
-        self.MICROSOFT_APP_PASSWORD = self.settings.MicrosoftAppPassword
-        self.MICROSOFT_APP_TYPE = self.settings.MicrosoftAppType
-        
-        # Admin settings
-        self.ADMIN_USER_ID = self.settings.admin_user_id
-        self.ADMIN_USER_NAME = self.settings.admin_user_name
-        self.ADMIN_USER_EMAIL = self.settings.admin_user_email
-        
-        # Security settings
-        self.SECURITY_RBAC_ENABLED = self.settings.security_rbac_enabled
-        
-        # Persona settings (compatibility with existing code)
-        self.AVAILABLE_PERSONAS = AVAILABLE_PERSONAS
-        self.DEFAULT_PERSONA = DEFAULT_PERSONA
-        
-        # Tool configuration limits and optimizations
-        self.MAX_FUNCTION_DECLARATIONS = 12  # Reasonable default for LLM tool limits
-        self.SCHEMA_OPTIMIZATION = {
-            "max_tool_schema_properties": 15,
-            "max_tool_description_length": 200,
-            "max_tool_enum_values": 10,
-            "max_nested_object_properties": 8,
-            "max_array_item_properties": 6,
-            "flatten_nested_objects": False
-        }
-        
-        # Tool Selector configuration
-        self.TOOL_SELECTOR = {
-            "enabled": True,
-            "similarity_threshold": 0.1,  # Lower threshold for better tool selection
-            "max_tools": 15,
-            "always_include_tools": [],
-            "debug_logging": True,  # Enable debug logging to help diagnose issues
-            "default_fallback": True,
-            "cache_path": os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "data",
-                "tool_embeddings.json"
-            ),
-            "auto_save_interval_seconds": 300,
-            "rebuild_cache_on_startup": False,
-            "embedding_model": "all-MiniLM-L6-v2"
-        }
-        
-        # Persona system prompts (if needed in the future)
-        self.PERSONA_SYSTEM_PROMPTS = {
-            "Default": self.DEFAULT_SYSTEM_PROMPT,
-            "Concise Communicator": self.DEFAULT_SYSTEM_PROMPT + "\n\nPlease be concise and direct in your responses.",
-            "Detailed Explainer": self.DEFAULT_SYSTEM_PROMPT + "\n\nPlease provide detailed explanations and context.",
-            "Code Reviewer": self.DEFAULT_SYSTEM_PROMPT + "\n\nFocus on code quality, best practices, and detailed technical analysis."
-        }
-    
     def _log_config_summary(self):
         """Log a summary of the loaded configuration."""
         log.info("=== Configuration Summary ===")
         log.info(f"Environment: {self.settings.app_env}")
         log.info(f"Port: {self.settings.port}")
         log.info(f"Log Level: {self.settings.log_level}")
-        log.info(f"Database: {self.STATE_DB_PATH}")
-        log.info(f"LLM Model: {self.GEMINI_MODEL}")
+        # Access via self.settings for previously direct attributes
+        log.info(f"Database: {self.settings.state_db_path}") 
+        log.info(f"LLM Model: {self.settings.gemini_model}")
         log.info(f"Memory Type: {self.settings.memory_type}")
         
         # Security
-        log.info(f"RBAC Enabled: {self.SECURITY_RBAC_ENABLED}")
-        if self.ADMIN_USER_ID:
-            log.info(f"Admin User: {self.ADMIN_USER_ID}")
+        log.info(f"RBAC Enabled: {self.settings.security_rbac_enabled}")
+        if self.settings.admin_user_id:
+            log.info(f"Admin User: {self.settings.admin_user_id}")
         
         # Services
         configured_services = []
@@ -771,34 +706,190 @@ class Config:
         
         log.info("=============================")
     
+    @property
+    def STATE_DB_PATH(self) -> str:
+        return self.settings.state_db_path
+
+    @property
+    def GEMINI_API_KEY(self) -> str:
+        return self.settings.gemini_api_key
+
+    @property
+    def GEMINI_MODEL(self) -> str:
+        return self.settings.gemini_model
+
+    @property
+    def DEFAULT_SYSTEM_PROMPT(self) -> str:
+        return self.settings.system_prompt
+
+    @property
+    def DEFAULT_API_TIMEOUT_SECONDS(self) -> int:
+        return self.settings.default_api_timeout_seconds
+
+    @property
+    def DEFAULT_API_MAX_RETRIES(self) -> int:
+        return self.settings.default_api_max_retries
+
+    @property
+    def LLM_MAX_HISTORY_ITEMS(self) -> int:
+        return self.settings.llm_max_history_items
+
+    @property
+    def MAX_CONSECUTIVE_TOOL_CALLS(self) -> int:
+        return self.settings.max_consecutive_tool_calls
+
+    @property
+    def MOCK_MODE(self) -> bool:
+        return self.settings.mock_mode
+
+    @property
+    def PERPLEXITY_API_URL(self) -> Optional[HttpUrl]: # Corrected type from AppSettings
+        return self.settings.perplexity_api_url
+
+    @property
+    def PERPLEXITY_MODEL(self) -> str:
+        return self.settings.perplexity_model
+    
+    @property
+    def PERPLEXITY_API_KEY(self) -> Optional[str]: # Added for completeness
+        return self.settings.perplexity_api_key
+
+    @property
+    def JIRA_API_EMAIL(self) -> Optional[EmailStr]: # Corrected type from AppSettings
+        return self.settings.jira_api_email
+
+    @property
+    def JIRA_API_URL(self) -> Optional[HttpUrl]: # Added for completeness
+        return self.settings.jira_api_url
+
+    @property
+    def JIRA_API_TOKEN(self) -> Optional[str]: # Added for completeness
+        return self.settings.jira_api_token
+
+    @property
+    def AVAILABLE_PERPLEXITY_MODELS_REF(self) -> List[str]:
+        return AVAILABLE_PERPLEXITY_MODELS_REF # This is a global constant
+
+    @property
+    def MICROSOFT_APP_ID(self) -> Optional[str]:
+        return self.settings.MicrosoftAppId
+
+    @property
+    def MICROSOFT_APP_PASSWORD(self) -> Optional[str]:
+        return self.settings.MicrosoftAppPassword
+
+    @property
+    def MICROSOFT_APP_TYPE(self) -> Optional[str]:
+        return self.settings.MicrosoftAppType
+
+    @property
+    def ADMIN_USER_ID(self) -> Optional[str]:
+        return self.settings.admin_user_id
+
+    @property
+    def ADMIN_USER_NAME(self) -> Optional[str]:
+        return self.settings.admin_user_name
+
+    @property
+    def ADMIN_USER_EMAIL(self) -> Optional[EmailStr]:
+        return self.settings.admin_user_email
+
+    @property
+    def SECURITY_RBAC_ENABLED(self) -> bool:
+        return self.settings.security_rbac_enabled
+
+    @property
+    def AVAILABLE_PERSONAS(self) -> List[str]:
+        return AVAILABLE_PERSONAS # This is a global constant
+
+    @property
+    def DEFAULT_PERSONA(self) -> str:
+        return DEFAULT_PERSONA # This is a global constant
+    
+    @property
+    def MAX_FUNCTION_DECLARATIONS(self) -> int:
+        return self.settings.max_function_declarations_for_llm # Now from AppSettings
+
+    @property
+    def SCHEMA_OPTIMIZATION(self) -> Dict[str, Any]:
+        return { # Remains hardcoded for now, complex to make fully configurable via env
+            "max_tool_schema_properties": 15,
+            "max_tool_description_length": 200,
+            "max_tool_enum_values": 10,
+            "max_nested_object_properties": 8,
+            "max_array_item_properties": 6,
+            "flatten_nested_objects": False
+        }
+
+    @property
+    def TOOL_SELECTOR(self) -> Dict[str, Any]:
+        # Construct this dict using values from self.settings where appropriate
+        cache_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data",
+            "tool_embeddings.json"
+        )
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        return {
+            "enabled": self.settings.tool_selector_enabled,
+            "similarity_threshold": self.settings.tool_selector_similarity_threshold,
+            "max_tools": self.settings.tool_selector_max_tools,
+            "always_include_tools": [], # self.settings.tool_selector_always_include_tools if added
+            "debug_logging": self.settings.tool_selector_debug_logging,
+            "default_fallback": self.settings.tool_selector_default_fallback,
+            "cache_path": cache_path, # Constructed path
+            "auto_save_interval_seconds": 300, # Could be AppSettings field
+            "rebuild_cache_on_startup": False, # Could be AppSettings field
+            "embedding_model": self.settings.tool_selector_embedding_model
+        }
+
+    @property
+    def PERSONA_SYSTEM_PROMPTS(self) -> Dict[str, str]:
+        return {
+            "Default": self.settings.system_prompt,
+            "Concise Communicator": self.settings.system_prompt + "\n\nPlease be concise and direct in your responses.",
+            "Detailed Explainer": self.settings.system_prompt + "\n\nPlease provide detailed explanations and context.",
+            "Code Reviewer": self.settings.system_prompt + "\n\nFocus on code quality, best practices, and detailed technical analysis."
+        }
+    
+    # --- Methods that operate on or use settings --- 
     def is_tool_configured(self, tool_name: str, categories: Optional[List[str]] = None) -> bool:
         """
         Check if a tool is properly configured.
-        Delegates to the AppSettings method.
+        Delegates to the AppSettings (self.settings) method.
         """
-        return self.settings.is_tool_configured(tool_name, categories)
+        if self.settings:
+            return self.settings.is_tool_configured(tool_name, categories)
+        log.warning("Config.settings not initialized. Cannot check tool configuration.")
+        return False
     
     def get_env_value(self, env_name: str) -> Optional[str]:
         """
         Get an environment variable value.
-        Delegates to the AppSettings method.
+        Delegates to the AppSettings (self.settings) method.
+        This is more for introspection; direct access via config.settings.attribute_name is preferred.
         """
-        return self.settings.get_env_value(env_name)
+        if self.settings:
+            return self.settings.get_env_value(env_name)
+        log.warning("Config.settings not initialized. Cannot get env value.")
+        # Fallback to os.environ as a last resort if settings isn't even there
+        return os.environ.get(env_name)
     
     def health_check(self) -> Dict[str, Any]:
         """
         Perform a health check on the configuration.
+        Uses self.settings for necessary values.
         """
         try:
             issues = []
             
-            # Check critical settings
-            if not self.GEMINI_API_KEY:
+            # Check critical settings from self.settings
+            if not self.settings.gemini_api_key:
                 issues.append("GEMINI_API_KEY not configured")
             
-            # Check database path accessibility
+            # Check database path accessibility using self.settings.state_db_path
             try:
-                db_dir = os.path.dirname(os.path.abspath(self.STATE_DB_PATH))
+                db_dir = os.path.dirname(os.path.abspath(self.settings.state_db_path))
                 if not os.path.exists(db_dir):
                     os.makedirs(db_dir, exist_ok=True)
                 # Try to create/access the database file
@@ -807,7 +898,7 @@ class Config:
                     f.write("test")
                 os.remove(test_db_path)
             except Exception as e:
-                issues.append(f"Database path not accessible: {e}")
+                issues.append(f"Database path not accessible ({self.settings.state_db_path}): {e}")
             
             if issues:
                 return {
@@ -822,6 +913,7 @@ class Config:
                     "component": "Config"
                 }
         except Exception as e:
+            log.error(f"Error during Config health check: {e}", exc_info=True) # Log the exception
             return {
                 "status": "ERROR",
                 "message": f"Configuration health check failed: {e}",
@@ -831,36 +923,23 @@ class Config:
     def get_system_prompt(self, persona_name: str = "Default") -> str:
         """
         Get the system prompt for the specified persona.
-        
-        Args:
-            persona_name: The name of the persona to get the system prompt for.
-            
-        Returns:
-            The system prompt for the specified persona.
+        Uses self.settings.system_prompt and self.PERSONA_SYSTEM_PROMPTS (which itself uses self.settings.system_prompt).
         """
-        if not persona_name or not isinstance(persona_name, str):
-            log.warning(f"Invalid persona name provided: {persona_name}. Using default system prompt.")
-            return self.DEFAULT_SYSTEM_PROMPT
-        
-        if hasattr(self, 'PERSONA_SYSTEM_PROMPTS') and isinstance(self.PERSONA_SYSTEM_PROMPTS, dict):
-            prompt = self.PERSONA_SYSTEM_PROMPTS.get(persona_name)
-            if prompt:
-                log.debug(f"Using system prompt for persona: {persona_name}")
-                return prompt
-        
-        log.warning(f"No system prompt found for persona: {persona_name}. Using default.")
-        return self.DEFAULT_SYSTEM_PROMPT
-    
-    @property
-    def MAX_HISTORY_MESSAGES(self) -> int:
-        """Alias for LLM_MAX_HISTORY_ITEMS, used for backward compatibility."""
-        return self.settings.llm_max_history_items
-    
-    @MAX_HISTORY_MESSAGES.setter
-    def MAX_HISTORY_MESSAGES(self, value: int) -> None:
-        """Setter for MAX_HISTORY_MESSAGES to support testing."""
-        self.settings.llm_max_history_items = value
+        default_prompt_from_settings = self.settings.system_prompt
 
+        if not persona_name or not isinstance(persona_name, str):
+            log.warning(f"Invalid persona name provided: {persona_name}. Using default system prompt from settings.")
+            return default_prompt_from_settings
+        
+        # PERSONA_SYSTEM_PROMPTS is now a property that builds itself using self.settings.system_prompt
+        persona_prompts = self.PERSONA_SYSTEM_PROMPTS 
+        prompt = persona_prompts.get(persona_name)
+        if prompt:
+            log.debug(f"Using system prompt for persona: {persona_name}")
+            return prompt
+        
+        log.warning(f"No system prompt found for persona: {persona_name}. Using default from settings.")
+        return default_prompt_from_settings
 
 # Global configuration instance
 _config_instance: Optional[Config] = None

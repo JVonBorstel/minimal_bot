@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 from enum import Enum
 import asyncio
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ class UserIntent(Enum):
     ONBOARDING_POSTPONE = "onboarding_postpone"
     ONBOARDING_QUESTION = "onboarding_question"
     ONBOARDING_ANSWER = "onboarding_answer"
+    ONBOARDING_START = "onboarding_start"
+    ONBOARDING_STOP = "onboarding_stop"  # Stop/cancel active onboarding
     
     # Command intents
     COMMAND_HELP = "command_help"
@@ -119,74 +122,121 @@ Analyze the user's message and classify their intent. Consider the current conte
 
         return base_prompt
 
-    async def classify_intent(
-        self, 
-        user_message: str, 
-        context: Dict[str, Any]
-    ) -> Tuple[UserIntent, float]:
-        """
-        Classify user intent using LLM intelligence instead of hardcoded rules.
+    async def classify_intent(self, user_message: str, context: Dict[str, Any] = None) -> Tuple[UserIntent, float]:
+        """Classify the intent of a user message using the LLM"""
+        context = context or {}
+        user_role = context.get("user_role", "guest")
+        pending_onboarding_decision = context.get("pending_onboarding_decision", False)
+        active_onboarding_workflow = context.get("active_onboarding_workflow", False)
         
-        Args:
-            user_message: The user's message to classify
-            context: Current conversation context
+        if not user_message:
+            return UserIntent.UNCLEAR, 0.0
             
-        Returns:
-            Tuple of (intent, confidence_score)
-        """
+        # Fast pass for obvious patterns without LLM
+        user_input_lower = user_message.lower().strip()
         
-        # Create a cache key
-        cache_key = f"{user_message}:{hash(str(sorted(context.items())))}"
-        if cache_key in self.classification_cache:
-            logger.debug(f"Intent classification cache hit for: {user_message[:50]}")
-            return self.classification_cache[cache_key]
-        
+        # Check very specific exact commands first - prioritize precision
+        if user_input_lower in ["help", "help me", "what can you do", "what can you do?", "/help"]:
+            return UserIntent.COMMAND_HELP, 0.95
+            
+        if user_input_lower in ["reset chat", "clear history", "clear chat", "start over"]:
+            return UserIntent.COMMAND_RESET_CHAT, 0.95
+            
+        if active_onboarding_workflow:
+            # If already in onboarding workflow, categorize most messages as workflow continuations
+            if user_input_lower in ["exit", "stop", "quit", "skip onboarding", "cancel", "cancel onboarding", "exit onboarding", "abort"]:
+                return UserIntent.ONBOARDING_STOP, 0.9
+            
+            # Otherwise, treat as workflow continuation
+            return UserIntent.WORKFLOW_CONTINUE, 0.8
+            
+        if pending_onboarding_decision:
+            # If user was prompted for onboarding and is responding
+            if user_input_lower in ["yes", "start", "begin", "let's go", "let's start", "start onboarding", "I want to onboard", "onboard me"]:
+                return UserIntent.ONBOARDING_ACCEPT, 0.95
+                
+            if user_input_lower in ["no", "skip", "later", "maybe later", "not now", "nah", "nope", "skip onboarding", "no thanks", "not interested"]:
+                return UserIntent.ONBOARDING_DECLINE, 0.95
+                
+            if user_input_lower in ["remind me later", "tomorrow", "next time", "postpone"]:
+                return UserIntent.ONBOARDING_POSTPONE, 0.95
+                
+            # If message doesn't clearly address onboarding prompt, return unclear
+            # Let the LLM analyze it more deeply below
+            
         try:
-            # Create classification prompt
-            classification_context = {
-                **context,
-                "user_message": user_message
-            }
+            # Regular expression patterns for specific commands
+            onboarding_pattern = r"(?i)^(onboard|set(up)? preferences?|config(ure)?( me)?|set(up)?( me)?)$"
+            perms_pattern = r"(?i)(my role|my permissions?|what( can)? i (do|access)|access control|admin rights|what is my role|show my role)$"
+
+            # Check patterns without LLM
+            if re.match(onboarding_pattern, user_input_lower):
+                return UserIntent.ONBOARDING_START, 0.9
+
+            if re.match(perms_pattern, user_input_lower):
+                return UserIntent.COMMAND_PERMISSIONS, 0.9
+
+            # For more complex requests, use LLM
+            system_prompt = """You are an intent classification system. Your job is to categorize user messages into the following intents:
+- COMMAND_HELP: User is asking for help about the bot's capabilities
+- COMMAND_RESET_CHAT: User wants to clear chat history or restart conversation
+- COMMAND_PERMISSIONS: User is asking about their role, permissions, or admin status
+- ONBOARDING_START: User wants to start the onboarding process (setting preferences, etc)
+- ONBOARDING_ACCEPT: User is accepting an onboarding invitation
+- ONBOARDING_DECLINE: User is declining an onboarding invitation
+- ONBOARDING_POSTPONE: User wants to postpone onboarding for later
+- WORKFLOW_CONTINUE: User is continuing an active workflow
+- GENERAL_QUESTION: User is asking a general question
+- GENERAL_TASK: User is requesting a task to be performed (like creating code)
+- UNCLEAR: Intent is unclear or doesn't fit other categories
+
+Output ONLY ONE of these intent labels followed by a confidence score from 0-1, like this:
+INTENT_LABEL|0.85
+
+Don't explain your reasoning, just output the label and score."""
+
+            # Fix: Format messages properly for the LLM
+            # Combine system prompt with user message for Gemini compatibility
+            combined_user_content = f"{system_prompt}\n\nUser message: {user_message}\nPending onboarding decision: {pending_onboarding_decision}\nActive workflow: {active_onboarding_workflow}\nUser role: {user_role}"
             
-            prompt = self.get_intent_classification_prompt(classification_context)
+            messages = [
+                {"role": "user", "parts": [{"text": combined_user_content}]}
+            ]
+
+            response = await self.llm_interface.generate_content(messages=messages)
             
-            # Use LLM to classify intent
-            messages = [{"role": "user", "content": prompt}]
-            
-            # Get single response from LLM (not streaming)
-            response_text = ""
-            stream = self.llm_interface.generate_content_stream(
-                messages=messages,
-                app_state=context.get("app_state"),  # Pass app_state if available
-                tools=None  # No tools needed for classification
-            )
-            
-            async for chunk in stream:
-                if hasattr(chunk, 'text') and chunk.text:
-                    response_text += chunk.text
-                elif isinstance(chunk, dict) and chunk.get('text'):
-                    response_text += chunk['text']
-            
-            # Parse the response
-            intent_str = response_text.strip().upper()
-            
-            # Map to UserIntent enum
-            try:
-                intent = UserIntent(intent_str.lower())
-                confidence = 0.8  # High confidence for LLM classification
-                
-                # Cache the result
-                self.classification_cache[cache_key] = (intent, confidence)
-                
-                logger.info(f"Classified intent: '{user_message[:50]}' -> {intent.value}")
-                return intent, confidence
-                
-            except ValueError:
-                logger.warning(f"LLM returned unknown intent: {intent_str}")
+            if not response:
                 return UserIntent.UNCLEAR, 0.3
                 
+            # Extract intent and confidence from response
+            result_text = response.text.strip()
+            
+            # Parse response in format "INTENT|confidence"
+            parts = result_text.split('|', 1)
+            if len(parts) != 2:
+                logging.warning(f"LLM returned unknown intent: {result_text}")
+                return UserIntent.UNCLEAR, 0.3
+                
+            intent_str = parts[0].strip().upper()
+            try:
+                confidence = float(parts[1].strip())
+                # Sanity check on confidence
+                if not 0 <= confidence <= 1:
+                    confidence = 0.5
+            except ValueError:
+                confidence = 0.5
+                
+            # Map string to enum
+            try:
+                intent = UserIntent[intent_str]
+            except KeyError:
+                logging.warning(f"LLM returned unknown intent: {intent_str}")
+                return UserIntent.UNCLEAR, 0.3
+                
+            return intent, confidence
+            
         except Exception as e:
-            logger.error(f"Error in intent classification: {e}", exc_info=True)
+            logging.error(f"Error in intent classification: {e}")
             return UserIntent.UNCLEAR, 0.1
 
     def get_intent_handler_suggestions(self, intent: UserIntent, context: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,8 +1,13 @@
 # --- FILE: llm_interface.py ---
 import logging
-from typing import List, Dict, Any, Optional, Iterable, Union, TypeAlias, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, Iterable, Union, TypeAlias, TYPE_CHECKING, AsyncIterable
 import time
 import re
+import asyncio
+import random
+import uuid
+import hashlib
+import json
 
 # Use google.api_core.exceptions for specific API errors
 from google.api_core import exceptions as google_exceptions
@@ -10,9 +15,6 @@ from requests import exceptions as requests_exceptions
 
 # Import the main Config class for type hinting and settings access
 from config import Config # Assuming Config class is available
-
-# Import ToolSelector for dynamic tool selection
-from core_logic.tool_selector import ToolSelector
 
 # Import text utility functions
 from core_logic.text_utils import is_greeting_or_chitchat
@@ -99,15 +101,41 @@ class LLMInterface:
         self.model_name: str = config.GEMINI_MODEL
         self.timeout: int = config.DEFAULT_API_TIMEOUT_SECONDS
         
-        self.tool_selector = ToolSelector(config)
+        # Lazy import ToolSelector to avoid circular imports
+        try:
+            from core_logic.tool_selector import ToolSelector
+            self.tool_selector = ToolSelector(config)
+        except ImportError as e:
+            log.warning(f"Could not import ToolSelector: {e}. Tool selection will be disabled.")
+            # Create a mock tool selector with minimal interface
+            class MockToolSelector:
+                def __init__(self):
+                    self.enabled = False
+                def select_tools(self, *args, **kwargs):
+                    return []
+            self.tool_selector = MockToolSelector()
+            
+        self.response_cache: Dict[str, List[Dict[str,Any]]] = {} # In-memory cache for full responses
+        self.CACHE_MAX_SIZE = 50 # Simple max size for the cache
+        self.CACHE_ENABLED = True # TODO: Make this configurable via self.config if needed
 
         try:
             genai.configure(api_key=self.api_key)
             log.info(f"google-genai SDK configured successfully. Default Model: {self.model_name}, Request Timeout: {self.timeout}s")
-            self.model = genai.GenerativeModel(
-                self.model_name,
-                system_instruction=self.config.DEFAULT_SYSTEM_PROMPT # Using DEFAULT_SYSTEM_PROMPT from Config
-            )
+            
+            # Try to create model with system instruction first
+            try:
+                self.model = genai.GenerativeModel(
+                    self.model_name,
+                    system_instruction=self.config.DEFAULT_SYSTEM_PROMPT
+                )
+                log.info("Model initialized with system instruction")
+            except Exception as e:
+                # If system_instruction fails, create model without it
+                log.warning(f"Failed to create model with system_instruction: {e}. Creating without system instruction.")
+                self.model = genai.GenerativeModel(self.model_name)
+                log.info("Model initialized without system instruction")
+                
         except google_exceptions.GoogleAPIError as e:
             log.error(f"google-genai SDK configuration failed: {e}", exc_info=True)
             raise RuntimeError(f"Failed to configure google-genai SDK: {e}") from e
@@ -132,10 +160,19 @@ class LLMInterface:
         prev_model_name = self.model_name
         
         try:
-            self.model = genai.GenerativeModel(
-                model_name,
-                system_instruction=self.config.DEFAULT_SYSTEM_PROMPT # Apply system instruction here as well
-            )
+            # Try to create model with system instruction first
+            try:
+                self.model = genai.GenerativeModel(
+                    model_name,
+                    system_instruction=self.config.DEFAULT_SYSTEM_PROMPT
+                )
+                log.debug("Model updated with system instruction")
+            except Exception as e:
+                # If system_instruction fails, create model without it
+                log.warning(f"Failed to update model with system_instruction: {e}. Creating without system instruction.")
+                self.model = genai.GenerativeModel(model_name)
+                log.debug("Model updated without system instruction")
+                
             self.model_name = model_name
             log.info(f"Successfully updated LLM client to use model: {self.model_name}")
         except (google_exceptions.NotFound, google_exceptions.InvalidArgument) as e:
@@ -561,209 +598,403 @@ class LLMInterface:
         log.warning(f"No system prompt found for persona: {persona_name}. Using default.")
         return self.config.DEFAULT_SYSTEM_PROMPT
 
-    def generate_content_stream(
+    def _create_cache_key(self, messages: List[RuntimeContentType], tools: Optional[ToolType] = None, model_name: Optional[str] = None) -> str:
+        """Creates a hashable cache key from messages, tools, and model name."""
+        # Serialize messages. glm.Content needs careful handling.
+        serializable_messages = []
+        for msg in messages:
+            try:
+                # Check if it's a Google AI SDK Content object
+                if hasattr(msg, 'role') and hasattr(msg, 'parts'):
+                    # Handle Google AI SDK Content objects
+                    msg_dict = {
+                        "role": str(msg.role) if hasattr(msg.role, 'name') else str(msg.role),
+                        "parts": []
+                    }
+                    
+                    # Process parts safely
+                    if hasattr(msg, 'parts') and msg.parts:
+                        for part in msg.parts:
+                            if hasattr(part, 'text') and part.text:
+                                msg_dict["parts"].append({"text": str(part.text)})
+                            elif isinstance(part, dict):
+                                # Handle dict-style parts
+                                if 'text' in part:
+                                    msg_dict["parts"].append({"text": str(part['text'])})
+                                elif 'type' in part and part.get('type') == 'text':
+                                    msg_dict["parts"].append({"text": str(part.get('text', ''))})
+                            else:
+                                # Fallback for unknown part types
+                                msg_dict["parts"].append({"text": f"[{type(part).__name__}]"})
+                    
+                    serializable_messages.append(msg_dict)
+                elif isinstance(msg, dict):
+                    # Handle dict messages
+                    serializable_messages.append(msg)
+                elif hasattr(msg, 'to_dict'):
+                    # Try to_dict method for other objects
+                    try:
+                        serializable_messages.append(msg.to_dict())
+                    except Exception as to_dict_error:
+                        log.debug(f"to_dict() failed for message type {type(msg)}: {to_dict_error}")
+                        # Fallback to basic representation
+                        serializable_messages.append({
+                            "role": str(getattr(msg, 'role', 'unknown')),
+                            "content_type": type(msg).__name__
+                        })
+                else:
+                    # Fallback for any other type
+                    serializable_messages.append({
+                        "role": str(getattr(msg, 'role', 'unknown')), 
+                        "content_type": type(msg).__name__
+                    })
+            except Exception as msg_error:
+                log.debug(f"Error processing message for cache key: {msg_error}")
+                # Ultra-safe fallback
+                serializable_messages.append({"content_type": type(msg).__name__, "error": True})
+        
+        # Serialize tools. glm.Tool needs careful handling.
+        serializable_tools = None
+        if tools:
+            try:
+                # Check if it's a Google AI SDK Tool object
+                if hasattr(tools, 'function_declarations'):
+                    serializable_tools = {
+                        "type": "glm_tool",
+                        "functions": [decl.name for decl in tools.function_declarations] if tools.function_declarations else []
+                    }
+                elif hasattr(tools, 'to_dict'):
+                    try:
+                        serializable_tools = tools.to_dict()
+                    except Exception as to_dict_error:
+                        log.debug(f"to_dict() failed for tools type {type(tools)}: {to_dict_error}")
+                        serializable_tools = {"type": type(tools).__name__, "error": True}
+                elif isinstance(tools, (list, dict)):
+                    serializable_tools = tools
+                else:
+                    serializable_tools = {"type": type(tools).__name__}
+            except Exception as tools_error:
+                log.debug(f"Error processing tools for cache key: {tools_error}")
+                serializable_tools = {"type": type(tools).__name__, "error": True}
+
+        key_content = {
+            "messages": serializable_messages,
+            "tools": serializable_tools,
+            "model_name": model_name or self.model_name
+        }
+        
+        try:
+            serialized_content = json.dumps(key_content, sort_keys=True)
+        except TypeError as e:
+            log.warning(f"Could not fully serialize content for cache key due to TypeError: {e}. Using simplified key.")
+            # More robust fallback with better error handling
+            try:
+                simplified_messages = []
+                for m in serializable_messages:
+                    if isinstance(m, dict):
+                        simplified_messages.append({
+                            "role": m.get("role", "unknown"),
+                            "parts_count": len(m.get("parts", [])),
+                            "has_text": any("text" in part for part in m.get("parts", []) if isinstance(part, dict))
+                        })
+                    else:
+                        simplified_messages.append({"type": type(m).__name__})
+                
+                simplified_tools_info = None
+                if serializable_tools:
+                    if isinstance(serializable_tools, dict):
+                        simplified_tools_info = {
+                            "type": serializable_tools.get("type", "unknown"),
+                            "functions_count": len(serializable_tools.get("functions", []))
+                        }
+                    elif isinstance(serializable_tools, list):
+                        simplified_tools_info = {"type": "list", "count": len(serializable_tools)}
+                    else:
+                        simplified_tools_info = {"type": type(serializable_tools).__name__}
+                
+                simplified_key_content = {
+                    "messages_summary": simplified_messages,
+                    "tools_summary": simplified_tools_info,
+                    "model_name": model_name or self.model_name
+                }
+                serialized_content = json.dumps(simplified_key_content, sort_keys=True)
+            except Exception as fallback_error:
+                log.warning(f"Even simplified cache key serialization failed: {fallback_error}. Using basic hash.")
+                # Ultimate fallback - just use basic info
+                basic_content = f"model:{model_name or self.model_name}_msgs:{len(messages)}_tools:{bool(tools)}"
+                serialized_content = basic_content
+        
+        return hashlib.sha256(serialized_content.encode('utf-8')).hexdigest()
+
+    async def generate_content(
+        self,
+        messages: List[RuntimeContentType],
+        app_state: Optional[AppState] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        query: Optional[str] = None
+    ) -> Any:
+        """
+        Non-streaming wrapper around generate_content_stream.
+        Returns a response object with .text attribute for compatibility.
+        """
+        if not SDK_AVAILABLE:
+            log.error("LLMInterface: google-genai SDK not available. Cannot generate content.")
+            raise RuntimeError("LLM SDK not available")
+
+        # Create a simple response object to match expected interface
+        class SimpleResponse:
+            def __init__(self):
+                self.text = ""
+                self.tool_calls = []
+                
+        response = SimpleResponse()
+        
+        try:
+            # Collect all chunks from the stream
+            async for chunk in self.generate_content_stream(messages, app_state or AppState(), tools, query):
+                if chunk.get("type") == "text_chunk":
+                    response.text += chunk.get("content", "")
+                elif chunk.get("type") == "tool_calls":
+                    response.tool_calls.extend(chunk.get("content", []))
+                elif chunk.get("type") == "error":
+                    error_msg = chunk.get("content", "Unknown error")
+                    log.error(f"Error in generate_content stream: {error_msg}")
+                    raise RuntimeError(f"LLM generation failed: {error_msg}")
+            
+            return response
+            
+        except Exception as e:
+            log.error(f"Error in generate_content: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to generate content: {e}") from e
+
+    async def generate_content_stream(
         self,
         messages: List[RuntimeContentType],
         app_state: AppState,
         tools: Optional[List[Dict[str, Any]]] = None,
-        query: Optional[str] = None
-    ) -> Iterable[GenerateContentResponseType]:
-        if not messages:
-            raise ValueError("No messages provided for LLM generation")
-        if not self.model:
-             raise RuntimeError("LLM model client is not initialized.")
+        query: Optional[str] = None # Query is used by prepare_tools_for_sdk for selection
+    ) -> AsyncIterable[Dict[str, Any]]: # Changed return type for clarity
+        """
+        Generates content from the LLM, supporting streaming and tool use,
+        with enhanced error handling and retries.
+        Yields dictionaries: e.g., {"type": "text_chunk", "content": "..."}
+                                or {"type": "tool_calls", "content": [...]}
+                                or {"type": "error", "content": "...", ...}
+        """
         if not SDK_AVAILABLE:
-            raise ImportError("google-genai SDK is required but not available.")
+            log.error("LLMInterface: google-genai SDK not available. Cannot generate content.")
+            yield {"type": "error", "content": "LLM SDK not available.", "code": "SDK_UNAVAILABLE", "retryable": False}
+            return
 
-        current_config = get_config() # Get current config instance
-        llm_call_id = start_llm_call(model_name=self.model_name) # Start LLM call context
+        llm_call_id = start_llm_call(self.model_name) # Start LLM call logging context
+        log.info(f"LLM Call [{llm_call_id}] - Starting generate_content_stream. Model: {self.model_name}")
+        
+        # --- Caching Logic --- 
+        cache_key: Optional[str] = None
+        if self.CACHE_ENABLED:
+            try:
+                cache_key = self._create_cache_key(messages, tools if 'tools' in locals() else None)
+                if cache_key in self.response_cache:
+                    log.info(f"LLM Call [{llm_call_id}] - Cache HIT for key: {cache_key[:10]}...")
+                    cached_response_events = self.response_cache[cache_key]
+                    for event_part in cached_response_events:
+                        yield event_part
+                    # Move accessed item to end for pseudo-LRU (if cache grows large)
+                    self.response_cache[cache_key] = self.response_cache.pop(cache_key)
+                    clear_llm_call_id()
+                    return
+                log.info(f"LLM Call [{llm_call_id}] - Cache MISS for key: {cache_key[:10]}...")
+            except Exception as e_cache_key:
+                log.warning(f"LLM Call [{llm_call_id}] - Error creating cache key: {e_cache_key}. Proceeding without cache for this call.", exc_info=True)
+                cache_key = None # Ensure no caching if key creation failed
+        # --- End Caching Logic ---
 
-        # Retry configuration for quota errors
-        max_retries = 3
-        base_delay = 5  # seconds
-        max_delay = 60  # seconds
+        prepared_tools_sdk: Optional[ToolType] = None
+        if tools:
+            try:
+                prepared_tools_sdk = self.prepare_tools_for_sdk(tools, query=query, app_state=app_state)
+                if prepared_tools_sdk:
+                    log.info(f"LLM Call [{llm_call_id}] - Tools prepared for SDK: {[decl.name for decl in prepared_tools_sdk.function_declarations]}")
+                else:
+                    log.info(f"LLM Call [{llm_call_id}] - No tools prepared for SDK (either none selected or preparation failed).")
+            except Exception as e_tool_prep:
+                log.error(f"LLM Call [{llm_call_id}] - Error preparing tools for SDK: {e_tool_prep}", exc_info=True)
+                yield {"type": "error", "content": f"Error preparing tools: {e_tool_prep}", "code": "TOOL_PREP_ERROR", "retryable": False}
+                clear_llm_call_id()
+                return
 
-        try:
-            sdk_tool_obj: Optional[ToolType] = None
-            if tools:
-                # Pass app_state for permission checks in ToolSelector if it uses it
-                sdk_tool_obj = self.prepare_tools_for_sdk(tools, query=query, app_state=app_state)
+        generation_config = genai.types.GenerationConfig(
+            candidate_count=1,
+            # temperature=0.7, # Example, can be made configurable
+            # top_p=1.0,
+            # top_k=50,
+        )
+        if app_state and hasattr(app_state, 'selected_model_settings') and app_state.selected_model_settings:
+            # TODO: Apply selected_model_settings (temperature, top_p, etc.) to generation_config
+            # For now, this is a placeholder for future enhancement.
+            pass
 
-            generation_config = genai.types.GenerationConfig(candidate_count=1)
-            safety_settings: Optional[Dict[Any, Any]] = None # Keep as None if not configuring specific safety
-            
-            final_contents = [] # System prompt is now part of model initialization
-            final_contents.extend(messages)
+        max_retries = self.config.DEFAULT_API_MAX_RETRIES if self.config else 3
+        base_retry_delay = 1.0  # seconds
 
-            # Log LLM Request Payload if log_llm_interaction is True
-            if current_config.settings.log_llm_interaction:
-                # Construct a serializable request payload for logging
-                # This is a simplified representation. Actual API request might be more complex.
-                log_payload = {
-                    "model_name": self.model_name,
-                    "contents": final_contents, # This might contain complex objects
-                    "tools": sdk_tool_obj, # This might contain complex objects
-                    "generation_config": generation_config, # This might contain complex objects
-                    "safety_settings": safety_settings,
-                    "tool_config": {"function_calling_config": {"mode": "AUTO"}} if sdk_tool_obj else None,
-                }
-                # The 'contents' and 'tools' can be complex.
-                # We need to make sure they are serializable or convert them to a serializable format.
-                # For now, we'll rely on sanitize_data to handle this as best as it can.
-                # A more robust solution might involve custom serializers for SDK objects.
-                try:
-                    # Attempt to serialize parts of the payload that might not be directly JSON-serializable
-                    # For example, glm.Content objects in final_contents or glm.Tool in sdk_tool_obj
-                    # This is a placeholder for more robust serialization if needed.
-                    # For now, we'll pass it to sanitize_data which will attempt to convert.
-                    
-                    # Convert glm.Content to dict if possible
-                    serializable_contents = []
-                    for item in final_contents:
-                        if hasattr(item, 'to_dict'): # Check if it's a new SDK object
-                            serializable_contents.append(item.to_dict())
-                        elif isinstance(item, dict): # Already a dict (OpenAI format)
-                             serializable_contents.append(item)
-                        else: # Fallback, might not be perfectly serializable by json.dumps
-                            serializable_contents.append(str(item)) # Or a more specific conversion
-                    log_payload["contents"] = serializable_contents
+        for attempt in range(max_retries + 1):
+            try:
+                log.info(f"LLM Call [{llm_call_id}] - Attempt {attempt + 1}/{max_retries + 1} to call generate_content.")
+                if get_config().settings.log_llm_interaction: # Check if full logging is enabled
+                    log.debug(f"LLM Call [{llm_call_id}] - Request Messages: {sanitize_data(messages)}")
+                    if prepared_tools_sdk:
+                        log.debug(f"LLM Call [{llm_call_id}] - Request Tools: {sanitize_data(prepared_tools_sdk)}")
+                
+                # Ensure messages are in the correct format (glm.Content if not dicts)
+                sdk_messages = []
+                for msg in messages:
+                    if isinstance(msg, dict) and "role" in msg and "parts" in msg:
+                        # Convert dict to glm.Content if needed by SDK
+                        # For now, assuming the SDK handles dicts or glm.Content interchangeably
+                        # or that messages are already pre-formatted if necessary.
+                        sdk_messages.append(msg)
+                    elif hasattr(msg, 'role') and hasattr(msg, 'parts'): # Is already glm.Content like
+                        sdk_messages.append(msg)
+                    else:
+                        log.error(f"LLM Call [{llm_call_id}] - Invalid message format: {type(msg)}. Skipping message.")
+                        continue # Skip malformed message
 
-                    if sdk_tool_obj and hasattr(sdk_tool_obj, 'to_dict'): # For glm.Tool
-                        log_payload["tools"] = sdk_tool_obj.to_dict()
-                    elif sdk_tool_obj: # If not directly to_dict, maybe it's already a dict or needs specific handling
-                        # For now, assume it's either already suitable or will be handled by sanitize_data's string conversion
-                        pass
+                if not sdk_messages:
+                    log.error(f"LLM Call [{llm_call_id}] - No valid messages to send after formatting.")
+                    yield {"type": "error", "content": "No valid messages to send to LLM.", "code": "NO_VALID_MESSAGES", "retryable": False}
+                    clear_llm_call_id()
+                    return
 
-
-                    if generation_config and hasattr(generation_config, 'to_dict'):
-                        log_payload["generation_config"] = generation_config.to_dict()
-                    
-                except Exception as e:
-                    log.warning(f"Could not fully serialize LLM request payload for logging: {e}", exc_info=True)
-                    # log_payload will contain what was serializable.
-
-                sanitized_payload = sanitize_data(log_payload)
-                log.info(
-                    "LLM Request Details",
-                    extra={"event_type": "llm_request_payload", "data": sanitized_payload}
+                api_response_stream = self.model.generate_content(
+                    sdk_messages,
+                    generation_config=generation_config,
+                    tools=prepared_tools_sdk if prepared_tools_sdk else None,
+                    stream=True,
+                    request_options={"timeout": self.timeout}
                 )
 
-            if log.isEnabledFor(logging.DEBUG) and not current_config.settings.log_llm_interaction: # Avoid double logging if already done above
-                log_messages_summary = []
-                try:
-                    for i, m_item in enumerate(final_contents):
-                        item_role = 'unknown_role'
-                        item_parts_summary = []
-                        if isinstance(m_item, dict): # OpenAI like dicts
-                            item_role = m_item.get('role', 'dict_unknown_role')
-                            content_data = m_item.get('parts', m_item.get('content'))
-                            if isinstance(content_data, list):
-                                for part_item in content_data:
-                                    if isinstance(part_item, dict) and 'text' in part_item: item_parts_summary.append(f"text({len(part_item['text'])}c)")
-                                    elif isinstance(part_item, dict) and 'function_call' in part_item: item_parts_summary.append(f"fn_call:{part_item['function_call'].get('name')}")
-                                    elif isinstance(part_item, dict) and 'function_response' in part_item: item_parts_summary.append(f"fn_resp:{part_item['function_response'].get('name')}")
-                                    else: item_parts_summary.append(f"dict_part_type:{type(part_item)}")
-                            elif isinstance(content_data, str): item_parts_summary.append(f"text({len(content_data)}c)")
-                            else: item_parts_summary.append(f"dict_content_type:{type(content_data)}")
-                        elif hasattr(m_item, 'parts') and hasattr(m_item, 'role'): # SDK glm.Content
-                            item_role = m_item.role
-                            for p_item in m_item.parts:
-                                if hasattr(p_item, 'text') and p_item.text is not None: item_parts_summary.append(f"text({len(p_item.text)}c)")
-                                elif hasattr(p_item, 'function_call') and p_item.function_call: item_parts_summary.append(f"fn_call:{p_item.function_call.name}")
-                                elif hasattr(p_item, 'function_response') and p_item.function_response: item_parts_summary.append(f"fn_resp:{p_item.function_response.name}")
-                                else: item_parts_summary.append(f"sdk_part_type:{type(p_item)}")
-                        else:
-                            item_parts_summary.append(f"unknown_msg_fmt:{type(m_item)}")
-                        log_messages_summary.append(f"  [{i}] {item_role}: {', '.join(item_parts_summary) if item_parts_summary else '(no parts)'}")
-                    log.debug(f"LLM Input Summary ({len(final_contents)} items):\n" + "\n".join(log_messages_summary))
-                except Exception as debug_e: log.warning(f"Error generating LLM input summary: {debug_e}")
+                # Need to collect all yielded chunks if we intend to cache the full response stream events
+                all_chunks_for_cache: List[Dict[str, Any]] = [] 
 
-            log.info(f"Sending {len(final_contents)} content items to LLM ({self.model_name}), streaming. Tools provided: {bool(sdk_tool_obj)}")
-            if sdk_tool_obj and hasattr(sdk_tool_obj, 'function_declarations'):
-                log.debug(f"  Tool details: {len(sdk_tool_obj.function_declarations)} function declarations: {[fd.name for fd in sdk_tool_obj.function_declarations[:5]]}...") # Log first 5
-            
-            # Retry loop for API calls with exponential backoff
-            last_exception = None
-            for attempt in range(max_retries + 1):  # 0, 1, 2, 3 (4 total attempts)
-                try:
-                    response_stream = self.model.generate_content(
-                        contents=final_contents,
-                        generation_config=generation_config,
-                        safety_settings=safety_settings,
-                        tools=sdk_tool_obj,
-                        tool_config={"function_calling_config": {"mode": "AUTO"}} if sdk_tool_obj else None,
-                        stream=True,
-                        request_options={'timeout': self.timeout}
-                    )
-                    log.debug(f"Received streaming response iterator from LLM: {self.model_name}")
-
-                    # Wrapper iterator to log response chunks
-                    def response_logging_iterator(stream):
-                        full_response_chunks = []
-                        try:
-                            for chunk in stream:
-                                if current_config.settings.log_llm_interaction:
-                                    # Log each chunk if verbose logging is on.
-                                    # Need to ensure 'chunk' is serializable or convert it.
-                                    # Similar to request, SDK objects might need to_dict()
-                                    try:
-                                        if hasattr(chunk, 'to_dict'):
-                                            log_chunk_data = chunk.to_dict()
-                                        else:
-                                            log_chunk_data = str(chunk) # Fallback
-                                        
-                                        # Storing for full response log later, before sanitization for that log
-                                        full_response_chunks.append(log_chunk_data)
-
-                                        # log.debug( # Changed to debug to avoid flooding logs for every chunk unless specifically needed
-                                        # "LLM Response Chunk",
-                                        # extra={"event_type": "llm_response_chunk", "data": sanitize_data(log_chunk_data)}
-                                        # )
-                                    except Exception as e:
-                                        log.warning(f"Could not serialize LLM response chunk for logging: {e}")
-                                else:
-                                    # If not logging full interaction, we still might need to collect chunks
-                                    # if other logic depends on full_response_chunks (e.g. for a final summary log).
-                                    # For now, only collect if log_llm_interaction is true for the final log.
-                                    pass 
-                                yield chunk
-                        finally:
-                            if current_config.settings.log_llm_interaction and full_response_chunks:
-                                # Log the complete aggregated response
-                                sanitized_full_response = sanitize_data({"response_chunks": full_response_chunks})
-                                log.info(
-                                    "LLM Full Response Details",
-                                    extra={"event_type": "llm_response_payload", "data": sanitized_full_response}
-                                )
+                for part_response in api_response_stream:
+                    if get_config().settings.log_llm_interaction:
+                        log.debug(f"LLM Call [{llm_call_id}] - Stream Part Received: {sanitize_data(part_response)}")
                     
-                    return response_logging_iterator(response_stream)
+                    # Process streaming response parts carefully
+                    # Check if there's text content first
+                    if hasattr(part_response, 'text') and part_response.text:
+                        event_to_yield = {"type": "text_chunk", "content": part_response.text}
+                        all_chunks_for_cache.append(event_to_yield)
+                        yield event_to_yield
+                    
+                    # Check for function calls (tool calls) in candidates
+                    if hasattr(part_response, 'candidates') and part_response.candidates:
+                        for candidate in part_response.candidates:
+                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                for content_part in candidate.content.parts:
+                                    # Handle text parts
+                                    if hasattr(content_part, 'text') and content_part.text:
+                                        event_to_yield = {"type": "text_chunk", "content": content_part.text}
+                                        all_chunks_for_cache.append(event_to_yield)
+                                        yield event_to_yield
+                                    # Handle function calls
+                                    elif hasattr(content_part, 'function_call') and content_part.function_call:
+                                        fc = content_part.function_call
+                                        event_to_yield = {
+                                            "type": "tool_calls", 
+                                            "content": [{
+                                                "id": f"call_{uuid.uuid4().hex[:8]}", # Generate a unique call ID
+                                                "type": "function",
+                                                "function": {"name": fc.name, "arguments": dict(fc.args) if hasattr(fc, 'args') else {}}
+                                            }]
+                                        }
+                                        all_chunks_for_cache.append(event_to_yield)
+                                        yield event_to_yield
+                
+                # --- Cache successful response --- 
+                if self.CACHE_ENABLED and cache_key and all_chunks_for_cache:
+                    if len(self.response_cache) >= self.CACHE_MAX_SIZE:
+                        # Simple FIFO eviction if cache is full
+                        try:
+                            oldest_key = next(iter(self.response_cache))
+                            self.response_cache.pop(oldest_key, None)
+                            log.debug(f"LLM Call [{llm_call_id}] - Cache full, evicted oldest key: {oldest_key[:10]}...")
+                        except StopIteration: # Should not happen if cache size >= 1
+                            pass 
+                    self.response_cache[cache_key] = all_chunks_for_cache # Store list of event dicts
+                    log.info(f"LLM Call [{llm_call_id}] - Response stored in cache with key: {cache_key[:10]}...")
+                # --- End Cache successful response --- 
 
-                except google_exceptions.ResourceExhausted as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        # Calculate delay with exponential backoff
-                        delay = min(base_delay * (2 ** attempt), max_delay)
-                        log.warning(f"Google API quota exceeded (attempt {attempt + 1}/{max_retries + 1}). Retrying in {delay} seconds...")
-                        time.sleep(delay)
-                        continue
-                    else:
-                        log.error(f"Google API quota exceeded after {max_retries + 1} attempts. Giving up.")
-                        raise e
+                log.info(f"LLM Call [{llm_call_id}] - Stream successfully completed and processed.")
+                # Yield collected chunks first IF NOT ALREADY YIELDED (this needs refinement based on streaming vs full response caching)
+                # For now, assuming the cache stores the yielded events. If it stores full text, this would differ.
+                # The current cache stores List[Dict[str,Any]] which are the events.
 
-                except google_exceptions.GoogleAPIError as e:
-                    log.error(f"Google API error during streaming call ({self.model_name}): {e}", exc_info=True)
-                    if isinstance(e, google_exceptions.PermissionDenied): 
-                        log.error("Permission denied. Check API key permissions.")
-                    elif isinstance(e, google_exceptions.InvalidArgument): 
-                        log.error(f"Invalid argument provided to API: {e}")
-                    raise e
+                yield {"type": "completed", "content": {"status": "COMPLETED_OK"}} 
+                clear_llm_call_id()
+                return # Exit after successful stream
 
-                except (requests_exceptions.RequestException, TimeoutError) as e:
-                    log.error(f"Network error during LLM streaming call: {e}", exc_info=True)
-                    raise RuntimeError(f"Network error during LLM streaming call: {e}") from e 
+            except google_exceptions.RetryError as e:
+                log.warning(f"LLM Call [{llm_call_id}] - Google SDK RetryError (will be retried by this loop if attempts left): {e}", exc_info=True)
+                if attempt >= max_retries:
+                    log.error(f"LLM Call [{llm_call_id}] - Max retries reached for Google SDK RetryError. Error: {e}")
+                    yield {"type": "error", "content": f"LLM API retry error: {e}", "code": "API_RETRY_ERROR", "retryable": True, "final_attempt": True}
+                    clear_llm_call_id()
+                    return
+                # Fall through to wait and retry for RetryError
+            except google_exceptions.DeadlineExceeded as e:
+                log.warning(f"LLM Call [{llm_call_id}] - DeadlineExceeded: {e}", exc_info=True)
+                if attempt >= max_retries:
+                    log.error(f"LLM Call [{llm_call_id}] - Max retries reached for DeadlineExceeded. Error: {e}")
+                    yield {"type": "error", "content": f"LLM API request timed out: {e}", "code": "API_TIMEOUT", "retryable": True, "final_attempt": True}
+                    clear_llm_call_id()
+                    return
+                # Fall through to wait and retry
+            except google_exceptions.ServiceUnavailable as e: # Typically 503
+                log.warning(f"LLM Call [{llm_call_id}] - ServiceUnavailable: {e}", exc_info=True)
+                if attempt >= max_retries:
+                    log.error(f"LLM Call [{llm_call_id}] - Max retries reached for ServiceUnavailable. Error: {e}")
+                    yield {"type": "error", "content": f"LLM service unavailable: {e}", "code": "API_SERVICE_UNAVAILABLE", "retryable": True, "final_attempt": True}
+                    clear_llm_call_id()
+                    return
+                # Fall through to wait and retry
+            except google_exceptions.ResourceExhausted as e: # Typically 429 Rate Limiting
+                log.warning(f"LLM Call [{llm_call_id}] - ResourceExhausted (Rate Limit?): {e}", exc_info=True)
+                # Check if the error specifically indicates to wait (e.g., from metadata)
+                # For now, assume it's retryable with longer backoff if attempts left
+                if attempt >= max_retries:
+                    log.error(f"LLM Call [{llm_call_id}] - Max retries reached for ResourceExhausted. Error: {e}")
+                    yield {"type": "error", "content": f"LLM API resource exhausted (rate limit?): {e}", "code": "API_RATE_LIMIT", "retryable": True, "final_attempt": True}
+                    clear_llm_call_id()
+                    return
+                base_retry_delay = 5.0 # Use a longer base delay for rate limits
+            except (google_exceptions.InvalidArgument, google_exceptions.PermissionDenied, google_exceptions.Unauthenticated, google_exceptions.NotFound) as e:
+                log.error(f"LLM Call [{llm_call_id}] - Non-retryable API error: {e}", exc_info=True)
+                yield {"type": "error", "content": f"LLM API client/auth error: {e}", "code": "API_CLIENT_ERROR", "retryable": False}
+                clear_llm_call_id()
+                return
+            except (requests_exceptions.ConnectionError, requests_exceptions.Timeout, TimeoutError) as e: # Python's TimeoutError
+                log.warning(f"LLM Call [{llm_call_id}] - Network/Timeout error: {e}", exc_info=True)
+                if attempt >= max_retries:
+                    log.error(f"LLM Call [{llm_call_id}] - Max retries reached for Network/Timeout error. Error: {e}")
+                    yield {"type": "error", "content": f"Network/Timeout error communicating with LLM: {e}", "code": "NETWORK_TIMEOUT_ERROR", "retryable": True, "final_attempt": True}
+                    clear_llm_call_id()
+                    return
+                # Fall through to wait and retry
+            except Exception as e: # Catch-all for unexpected errors from the SDK or logic
+                log.error(f"LLM Call [{llm_call_id}] - Unexpected error during generate_content_stream (Attempt {attempt + 1}): {e}", exc_info=True)
+                # For a general exception, don't retry unless specifically known to be transient.
+                yield {"type": "error", "content": f"Unexpected error in LLM stream: {e}", "code": "UNEXPECTED_LLM_ERROR", "retryable": False}
+                clear_llm_call_id()
+                return
+            
+            # If we are here, it means a retryable error occurred and we have attempts left
+            wait_seconds = (base_retry_delay * (2 ** attempt)) + random.uniform(0, 0.5)
+            log.info(f"LLM Call [{llm_call_id}] - Retrying in {wait_seconds:.2f} seconds...")
+            await asyncio.sleep(wait_seconds)
 
-        except Exception as e:
-            log.error(f"Unexpected error during streaming LLM call ({self.model_name}): {e}", exc_info=True)
-            raise RuntimeError(f"LLM stream generation failed: {e}") from e
-        finally:
-            clear_llm_call_id() # Clear LLM call ID in all cases
+        # If loop finishes, all retries were exhausted for some retryable error
+        log.error(f"LLM Call [{llm_call_id}] - All retries failed for generate_content_stream.")
+        # This path should ideally be covered by specific error yields with final_attempt=True
+        yield {"type": "error", "content": "LLM operation failed after all retries.", "code": "API_MAX_RETRIES_EXCEEDED", "retryable": True, "final_attempt": True}
+        clear_llm_call_id()
