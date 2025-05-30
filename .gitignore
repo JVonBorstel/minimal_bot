@@ -30,7 +30,8 @@ var/
 
 # Logs
 *.log
-logs/
+logs/*
+!logs/.gitkeep
 startup_log.txt
 bot_integration.log
 test_database_backend_switching.log
@@ -49,30 +50,17 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
-tests/
-test_*.py
-*_test.py
-*test.py
-tests_*.py
-debug*.py
+
+# Keep test directory but exclude specific test files
+# tests/ - We want to track tests in the repo
+**/tests/**/*.log
+**/tests/**/temp/
+test_memory_management.log
+test_results.log
 *debug*.py
 automated_bot_tester.py
 ultimate_bot_tester.py
 simple_bot_test.py
-test_complete_onboarding_flow.py
-test_direct_jira_api.py
-test_jira_story_builder.py
-test_memory_management.log
-test_new_jira_token.py
-test_results.log
-test_story_builder.py
-test_tool_reliability_fixed.py
-test_tool_reliability.py
-test_ultimate_onboarding_stress.py
-test_workflow_fixes.py
-validate_comprehensive_fix.py # Assuming this is for testing/validation
-check_db.py # Assuming this is a test/check script
-check_dependencies.py # Assuming this is a test/check script
 
 # Development tools and scripts (evaluate if any are needed in production)
 # Comment out if needed for specific operational tasks, otherwise ignore for cleaner repo
@@ -90,23 +78,14 @@ show_my_jira_tickets.py
 monitor_bot_health.py # If this is for local dev monitoring only
 requirements-minimal.txt # If not the primary requirements file
 
-# Documentation and reports (not needed at runtime, keep essential docs)
-*_REPORT.md
-*_SUMMARY.md
-COMPREHENSIVE_FIX_SUMMARY.md
-FINAL_COMPREHENSIVE_FIX_REPORT.md
-TOOL_RELIABILITY_INVESTIGATION_REPORT.md
-TEST_ORGANIZATION_SUMMARY.md
-LLM_CODEBASE_EXPORT.md
-# README.md # Keep
-# QUICK_START.md # Keep if useful for users
-# EASY_HOSTING.md # Keep if useful for users
-# DEPLOYMENT_GUIDE.md # Keep if useful for users
-# jira_scopes_guide.md # Keep if useful documentation
+# Documentation
+# Ensure important documentation is tracked
+# We're now properly organizing docs in subdirectories
+docs/**/temp/
+docs/**/draft/
 
 # Bot files (these look like test bots or examples)
-*.bot
-Aughie.bot
+# *.bot # Track bot configuration files for the repo
 Augie-Tester.bot
 asdgasdgasgas.bot
 
@@ -117,9 +96,9 @@ embeddings_cache/
 # cache/ # This is already covered by .pytest_cache/v/cache if it's pytest related.
 
 # Development configuration
-.env.example # Good to keep as a template
+# .env.example # Good to keep as a template
 .cursorrules # Specific to Cursor, usually local dev
-# pytest.ini # Test configuration, will be ignored if tests/ is ignored but can be kept if tests are run in CI from a different checkout strategy
+# pytest.ini # Test configuration, will be kept in repo
 
 # IDE and editor files
 .vscode/

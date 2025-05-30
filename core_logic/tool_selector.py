@@ -1,7 +1,4 @@
-# AGENT: This file depends on config.py, numpy, sentence-transformers,
-# and logging. Import these at the top.
-# AGENT: If 'data/' directory does not exist, create it before saving
-# embeddings.
+
 
 # core_logic/tool_selector.py
 

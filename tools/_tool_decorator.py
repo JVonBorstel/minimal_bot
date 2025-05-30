@@ -102,169 +102,103 @@ def _resolve_ref_in_schema(schema: Dict[str, Any], defs: Dict[str, Any]) -> Dict
     return resolved_schema
 
 
-def _map_py_type_to_json_schema(py_type: Any) -> Optional[Dict[str, Any]]:
+def _map_py_type_to_json_schema(py_type: Any, tool_name_for_log: str = "unknown_tool", param_name_for_log: str = "unknown_param") -> Optional[Dict[str, Any]]:
     """
     Maps Python types to a JSON schema dictionary.
-    Handles basic types, Optional, Union, Literal, List, Dict, and Tuple.
-
-    Args:
-        py_type: The Python type to map
-
-    Returns:
-        A dictionary representing the JSON schema for the type,
-        or None if the type should be excluded (e.g., Config, AppState).
+    Excludes Config, AppState, Message, UserProfile from schema.
+    If an item type in List[T] or Tuple[T,...] is excluded, the parameter is excluded from the schema.
     """
-    # CRITICAL FIX: Exclude AppState and other complex state objects from tool schemas
-    if py_type is Config:
-        log.debug(f"Identified Config type {py_type}, excluding from schema.")
-        return None
-        
-    # Check if it's an AppState type (handle both direct import and string comparison)
-    type_name = getattr(py_type, '__name__', str(py_type))
-    if 'AppState' in type_name or 'Message' in type_name or 'UserProfile' in type_name:
-        log.debug(f"Identified complex state type {py_type}, excluding from schema.")
-        return None
+    # Direct exclusion for Config and specific state model names
+    type_name_str = getattr(py_type, '__name__', str(py_type))
+    excluded_types_by_name = ['AppState', 'Message', 'UserProfile', 'Config'] # Add other internal objects if necessary
+    if py_type is Config or any(excluded_name in type_name_str for excluded_name in excluded_types_by_name):
+        log.debug(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Type '{type_name_str}' excluded from schema.")
+        return None # Explicitly exclude these types
 
     origin = get_origin(py_type)
     args = get_args(py_type)
 
-    # CRITICAL FIX: Handle Tuple types properly
     if origin is tuple or origin is Tuple:
-        # Convert Tuple[str, str, str, str] to array with string items
         if args:
-            # For homogeneous tuples, use the first type
-            first_type_schema = _map_py_type_to_json_schema(args[0])
-            if first_type_schema:
-                return {
-                    "type": "array",
-                    "items": first_type_schema,
-                    "minItems": len(args),
-                    "maxItems": len(args),
-                    "description": f"Tuple with {len(args)} elements"
-                }
-        return {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Tuple (converted to array)"
-        }
+            # If any item type is excluded, exclude the whole tuple
+            for arg_item_type in args:
+                item_schema = _map_py_type_to_json_schema(arg_item_type, tool_name_for_log, f"{param_name_for_log}[tuple_item]")
+                if item_schema is None:
+                    log.debug(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Tuple contains excluded type. Excluding parameter.")
+                    return None
+            # If all items are mappable, proceed as before
+            item_schemas = [_map_py_type_to_json_schema(arg_item_type, tool_name_for_log, f"{param_name_for_log}[tuple_item]") for arg_item_type in args]
+            return {
+                "type": "array",
+                "items": item_schemas[0] if len(item_schemas) == 1 else item_schemas,
+                "minItems": len(args),
+                "maxItems": len(args)
+            }
+        log.warning(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Tuple type '{py_type}' items could not be fully mapped or empty. Excluding parameter.")
+        return None
 
     if origin is Literal:
-        # Literal['a', 'b'] -> {"type": "string", "enum": ["a", "b"]}
         if args:
             first_arg_type = type(args[0])
-            json_type = "string"  # Default for literals
-            if first_arg_type is int:
-                json_type = "integer"
-            elif first_arg_type is bool:
-                json_type = "boolean"
-            elif first_arg_type is float:
-                json_type = "number"
-
+            json_type = "string"
+            if first_arg_type is int: json_type = "integer"
+            elif first_arg_type is bool: json_type = "boolean"
+            elif first_arg_type is float: json_type = "number"
             return {"type": json_type, "enum": list(args)}
-        else:
-            log.warning(f"Literal type '{py_type}' has no arguments. Mapping to string.")
-            return {"type": "string"}
+        return {"type": "string"}
 
     if origin is Union:
         non_none_args = [arg for arg in args if arg is not type(None)]
+        if not non_none_args: return {"type": "null"}
+        is_optional = len(args) > len(non_none_args)
+        sub_schemas = [_map_py_type_to_json_schema(arg, tool_name_for_log, f"{param_name_for_log}[union_option]") for arg in non_none_args]
+        valid_sub_schemas = [s for s in sub_schemas if s]
+        if not valid_sub_schemas: # All options were excluded
+            return {"type": "null"} if is_optional else None # If not optional and all excluded, exclude the param
+        final_schema_choices = valid_sub_schemas
+        if is_optional: final_schema_choices.append({"type": "null"})
+        if len(final_schema_choices) == 1: return final_schema_choices[0]
+        return {"anyOf": final_schema_choices}
 
-        if not non_none_args:  # Union[NoneType]
-            return {"type": "null"}
-
-        # If it was Optional[T] (i.e., Union[T, NoneType])
-        if len(args) > len(non_none_args):  # Means NoneType was present
-            if len(non_none_args) == 1:  # Optional[T]
-                inner_type = non_none_args[0]
-                # Handle simple Optional primitive types directly
-                if inner_type is str:
-                    return {"type": "string", "nullable": True}
-                elif inner_type is int:
-                    return {"type": "integer", "nullable": True}
-                elif inner_type is float:
-                    return {"type": "number", "nullable": True}
-                elif inner_type is bool:
-                    return {"type": "boolean", "nullable": True}
-                else:
-                    # Fallback to existing logic for Optional[ComplexType]
-                    type_schema = _map_py_type_to_json_schema(inner_type)
-                    if type_schema:
-                        return {"anyOf": [type_schema, {"type": "null"}]}
-                    else:  # Inner type was excluded (e.g. Config)
-                        return {"type": "null"}
-            else:  # Optional[Union[A,B,...]]
-                sub_schemas = [_map_py_type_to_json_schema(arg) for arg in non_none_args]
-                valid_sub_schemas = [s for s in sub_schemas if s]
-                if valid_sub_schemas:
-                    return {"anyOf": valid_sub_schemas + [{"type": "null"}]}
-                else:
-                    return {"type": "null"}
-        else:  # Plain Union[A, B, ...] (no NoneType)
-            sub_schemas = [_map_py_type_to_json_schema(arg) for arg in non_none_args]
-            valid_sub_schemas = [s for s in sub_schemas if s]
-            if len(valid_sub_schemas) == 1:
-                return valid_sub_schemas[0]
-            elif valid_sub_schemas:
-                return {"anyOf": valid_sub_schemas}
-            else:
-                log.warning(f"Union type '{py_type}' consists only of excluded types. Mapping to null.")
-                return {"type": "null"}
-            
     elif origin in (list, List):
-        item_schema = {"type": "string"}  # Default item type
         if args:
-            item_type_schema = _map_py_type_to_json_schema(args[0])
-            if item_type_schema:
-                item_schema = item_type_schema
-        return {"type": "array", "items": item_schema}
-    elif origin in (dict, Dict):
-        additional_properties_schema: Union[bool, Dict[str, Any]] = True
-        if args and len(args) == 2:
-            value_type_schema = _map_py_type_to_json_schema(args[1])
-            if value_type_schema:
-                additional_properties_schema = value_type_schema
-        return {"type": "object", "additionalProperties": additional_properties_schema}
-    elif py_type is str:
-        return {"type": "string"}
-    elif py_type is int:
-        return {"type": "integer"}
-    elif py_type is float:
-        return {"type": "number"}
-    elif py_type is bool:
-        return {"type": "boolean"}
-    elif py_type is Any or py_type is inspect.Parameter.empty:
-        return {"type": "string"}
-    elif py_type is type(None):
-        return {"type": "null"}
+            resolved_item_schema = _map_py_type_to_json_schema(args[0], tool_name_for_log, f"{param_name_for_log}[list_item]")
+            if resolved_item_schema is not None:
+                return {"type": "array", "items": resolved_item_schema}
+            else:
+                log.debug(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': List item type is excluded. Excluding parameter.")
+                return None
+        return {"type": "array", "items": {"type": "string"}}
 
-    # CRITICAL FIX: Enhanced handling for Pydantic models with better validation
+    elif origin in (dict, Dict):
+        if args and len(args) == 2:
+            val_schema = _map_py_type_to_json_schema(args[1], tool_name_for_log, f"{param_name_for_log}[dict_value]")
+            if val_schema is not None:
+                return {"type": "object", "additionalProperties": val_schema}
+            else:
+                log.debug(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Dict value type is excluded. Excluding parameter.")
+                return None
+        return {"type": "object", "additionalProperties": True}
+
+    elif py_type is str: return {"type": "string"}
+    elif py_type is int: return {"type": "integer"}
+    elif py_type is float: return {"type": "number"}
+    elif py_type is bool: return {"type": "boolean"}
+    elif py_type is Any or py_type is inspect.Parameter.empty: return {"type": "string", "description": "Any type."}
+    elif py_type is type(None): return {"type": "null"}
+
     if hasattr(py_type, 'model_json_schema') and callable(py_type.model_json_schema):
         try:
-            # Check if this is a complex state object that should be excluded
-            type_name = getattr(py_type, '__name__', str(py_type))
-            if any(excluded in type_name for excluded in ['AppState', 'Message', 'UserProfile', 'Config']):
-                log.debug(f"Excluding complex Pydantic model '{type_name}' from schema.")
-                return None
-                
-            log.debug(f"Using Pydantic's model_json_schema() for type '{py_type.__name__}'.")
+            log.debug(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Using Pydantic schema for '{type_name_str}'.")
             full_schema = py_type.model_json_schema()
-            
-            # Extract the main schema and definitions
             main_schema = {k: v for k, v in full_schema.items() if k != '$defs'}
             defs = full_schema.get('$defs', {})
-            
-            # Resolve all $ref references using the definitions
-            if defs:
-                resolved_schema = _resolve_ref_in_schema(main_schema, defs)
-                log.debug(f"Resolved {len(defs)} $ref definitions for type '{py_type.__name__}'")
-                return resolved_schema
-            else:
-                return main_schema
-
+            return _resolve_ref_in_schema(main_schema, defs) if defs else main_schema
         except Exception as e:
-            log.warning(f"Failed to get JSON schema from Pydantic model '{py_type.__name__}': {e}. Falling back to object.", exc_info=False)
-            return {"type": "object", "description": f"Complex object: {py_type.__name__}"}
+            log.warning(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Failed to get Pydantic schema for '{type_name_str}': {e}. Defaulting to object.", exc_info=False)
+            return {"type": "object", "description": f"Complex object: {type_name_str}"}
 
-    log.warning(f"Unsupported type hint '{py_type}' for JSON schema generation. Falling back to string.")
+    log.warning(f"Tool '{tool_name_for_log}', Param '{param_name_for_log}': Unsupported type '{py_type}' for schema. Defaulting to string.")
     return {"type": "string"}
 
 
@@ -673,180 +607,25 @@ def tool_function(
             if is_method:
                 params_to_process = params_to_process[1:]  # Skip 'self'
 
-            for param_name, param in params_to_process:
-                # Skip config injection if param name is 'config' and type is
-                # Config
-                if param_name == 'config' and param.annotation is Config:
-                    log.debug(
-                        f"Tool '{tool_name}': Explicitly skipping "
-                        f"'config: Config' parameter from schema generation."
-                    )
-                    continue
-
-                # Determine if parameter is required: No default AND type is
-                # not Optional/Union[..., None]
-                py_type_annotation = (
-                    param.annotation
-                    if param.annotation != inspect.Parameter.empty
-                    else Any
-                )
-                origin = get_origin(py_type_annotation)
-                args = get_args(py_type_annotation)
-
-                has_default = param.default != inspect.Parameter.empty
-                is_optional_type = (origin is Union and type(None) in args)
-
-                is_required = (not has_default) and (not is_optional_type)
-
-                if is_required:
-                    required_params.append(param_name)
-
-                # Log decision for clarity
-                # log.debug(
-                #    f"Parameter '{param_name}': Has Default={has_default}, "
-                #    f"Is Optional Type={is_optional_type} => Required={is_required}" # noqa: E501
-                # )
-
-                # Get Python type hint
-                py_type_annotation = (
-                    param.annotation
-                    if param.annotation != inspect.Parameter.empty
-                    else Any
-                )
-
-                # Generate JSON schema for the type
-                # _map_py_type_to_json_schema now returns a schema dict or None
-                param_schema = _map_py_type_to_json_schema(py_type_annotation)
-
-                # Skip parameters flagged for exclusion (like Config mapped to
-                # None)
-                if param_schema is None:
-                    log.debug(
-                        f"Tool '{tool_name}': Skipping parameter "
-                        f"'{param_name}' from schema because its type "
-                        f"({py_type_annotation}) maps to None schema."
-                    )
-                    continue  # Skip adding this parameter to the schema
-
-                param_desc = param_descriptions.get(
-                    param_name, f"Parameter '{param_name}'"
-                )  # Default description
-
-                # Add default value to description if present and simple
-                default_value_str = None
-                if not is_required:
-                    try:
-                        # Safely represent the default value
-                        default_repr = repr(param.default)
-                        # Keep default representation concise for description
-                        if len(default_repr) < 60:
-                            default_value_str = default_repr
-                        else:
-                            # Use a placeholder for complex or long defaults
-                            default_value_str = "<default value>"
-                    except Exception:
-                        # Catch any exception during repr()
-                        default_value_str = "<unrepresentable default value>"
-
-                    # Append default info to description only if it's not
-                    # the placeholder
-                    if default_value_str != "<unrepresentable default value>":
-                        param_desc += \
-                            f" (Optional, default: {default_value_str})"
-                    else:
-                        param_desc += " (Optional)"
-
-                # Merge the generated schema with description.
-                # The generated schema (param_schema) is the base.
-                # Start with the type schema (e.g., {"type": "string"},
-                # {"type": "array", "items": ...}, etc.)
-                final_param_info = param_schema.copy()
-                final_param_info["description"] = param_desc
-
-                # Special handling for Optional[List[T]] to ensure item type
-                # is correctly propagated. The _map_py_type_to_json_schema
-                # should handle Optional wrapping correctly.
-                # If py_type_annotation was Optional[List[Something]],
-                # _map_py_type_to_json_schema would return something like:
-                # {"anyOf": [{"type": "array",
-                #             "items": schema_for_Something},
-                #            {"type": "null"}]}
-                # The 'type' at the top level of final_param_info might be
-                # missing if it's an anyOf. The old logic for array item type
-                # needs to be reconsidered as _map_py_type_to_json_schema
-                # is more comprehensive.
-
-                # The main schema for the parameter is now directly from
-                # _map_py_type_to_json_schema. The specific "array" item
-                # handling below is largely superseded if
-                # _map_py_type_to_json_schema correctly generates the items
-                # part for List[T] or Optional[List[T]].
-                # Let's verify if `final_param_info` for an array type
-                # already includes correct `items`.
-
-                # If the type was Optional[List[Something]],
-                # py_type_annotation is that Union. We need to get the actual
-                # List type from it to determine item_type for the warning.
-                actual_list_type_for_warning = py_type_annotation
-                if get_origin(py_type_annotation) is Union:
-                    non_none_args = [
-                        a for a in get_args(py_type_annotation)
-                        if a is not type(None)
-                    ]
-                    if len(non_none_args) == 1 and \
-                       get_origin(non_none_args[0]) in (list, List):
-                        actual_list_type_for_warning = non_none_args[0]
-
-                # The warnings for list items now need to be re-evaluated
-                # based on the new _map_py_type_to_json_schema.
-                # If `param_schema` (which is `final_param_info` before
-                # description) is `{"type": "array",
-                # "items": {"type": "string"}}` due to a fallback *within*
-                # _map_py_type_to_json_schema for unmappable list items,
-                # that's where the log should occur.
-
-                # Example: if param_schema is
-                # {'type': 'array', 'items': {'type': 'string'}}
-                # and the original type was List[Unmappable]
-                if final_param_info.get("type") == "array":
-                    current_items_schema = final_param_info.get("items", {})
-                    # Check if the items schema defaulted to string due to an
-                    # issue
-                    if current_items_schema.get("type") == "string":
-                        # Try to find the original intended item type for a
-                        # better warning message
-                        list_origin = get_origin(actual_list_type_for_warning)
-                        list_args = get_args(actual_list_type_for_warning)
-                        if list_origin in (list, List) and list_args:
-                            original_item_type = list_args[0]
-                            # Check if this original item type would also map
-                            # to string or was complex. This condition is to
-                            # emit a warning if items defaulted to string due
-                            # to unmappable original item type.
-                            # This is a bit heuristic.
-                            temp_schema = _map_py_type_to_json_schema(
-                                original_item_type
-                            )
-                            if not temp_schema or \
-                               temp_schema.get("type") != "string":
-                                # This implies items defaulted to string not
-                                # because original item was string, but due
-                                # to mapping issues.
-                                # The warning should now come from
-                                # _map_py_type_to_json_schema if item
-                                # mapping fails
-                                pass
-                        elif list_origin in (list, List) and not list_args:
-                            # List without item type
-                            log.warning(
-                                f"Tool '{tool_name}': Parameter "
-                                f"'{param_name}' has List type without "
-                                f"specific item type. Defaulting array items "
-                                f"to string (already handled by "
-                                f"_map_py_type_to_json_schema)."
-                            )
-
-                inferred_properties[param_name] = final_param_info
+            for p_name, param_obj in params_to_process:
+                py_type_hint = param_obj.annotation if param_obj.annotation != inspect.Parameter.empty else Any
+                # Exclude 'config: Config' and 'app_state: AppState' from the LLM schema
+                param_json_schema_dict = _map_py_type_to_json_schema(py_type_hint, tool_name, p_name)
+                if param_json_schema_dict is None: # Type was excluded (e.g., AppState, Config, or List/Tuple thereof)
+                    log.debug(f"Tool '{tool_name}', Param '{p_name}': Type '{py_type_hint}' excluded from schema by _map_py_type_to_json_schema.")
+                    continue # Do not add this parameter to the tool's schema for the LLM
+                param_desc_str = param_descriptions.get(p_name, f"Parameter '{p_name}'")
+                if param_obj.default != inspect.Parameter.empty:
+                    try: default_repr = repr(param_obj.default)
+                    except: default_repr = "<unrepresentable>"
+                    param_desc_str += f" (Optional, default: {default_repr[:50]})"
+                else:
+                    origin_type = get_origin(py_type_hint)
+                    args_type = get_args(py_type_hint)
+                    if not (origin_type is Union and type(None) in args_type):
+                        required_params.append(p_name)
+                param_json_schema_dict["description"] = param_desc_str
+                inferred_properties[p_name] = param_json_schema_dict
 
             # Construct the final inferred schema
             final_parameters_schema = {

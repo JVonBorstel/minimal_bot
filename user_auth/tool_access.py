@@ -4,8 +4,8 @@ import inspect
 
 from user_auth.permissions import Permission, PermissionManager
 from user_auth.models import UserProfile
-from config import get_config # Added for RBAC check
-import logging # Added for logging
+from config import get_config 
+import logging 
 
 if TYPE_CHECKING:
     from state_models import AppState  # Assuming AppState will be in state_models
@@ -13,10 +13,7 @@ if TYPE_CHECKING:
 # Get a logger for this module
 logger = logging.getLogger(__name__) # Changed from print to logger
 
-# Placeholder for PermissionManager instantiation strategy if needed
-# For now, assuming PermissionManager can be instantiated directly if it has no __init__ dependencies
-# or that its methods used are static/class methods.
-# Based on P3A.2.2, PermissionManager is a class, so we'll instantiate it.
+
 
 def requires_permission(permission_name: Permission, fallback_permission: Optional[Permission] = None):
     """

@@ -6,7 +6,7 @@ import sys
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
-import time # For duration calculation
+import time 
 
 from config import Config, get_config # Import get_config
 from ._tool_decorator import (
@@ -18,25 +18,24 @@ from user_auth.permissions import Permission
 from state_models import AppState
 
 # Import logging utilities
-from utils.logging_config import get_logger, start_tool_call, clear_tool_call_id # Use get_logger
+from utils.logging_config import get_logger, start_tool_call, clear_tool_call_id 
 from utils.log_sanitizer import sanitize_data
 
 # === CRITICAL: IMPORT ALL TOOL MODULES TO TRIGGER DECORATOR REGISTRATION ===
-# This is the missing piece! The @tool_function decorators need to execute
-# for tools to be registered. We import all tool modules here.
+
 try:
     import tools.github_tools
     import tools.jira_tools
     import tools.greptile_tools
     import tools.perplexity_tools
-    import tools.core_tools  # Import core tools including help
-    import tools.user_profile_tools # Added for user preference management
+    import tools.core_tools  
+    import tools.user_profile_tools 
     log_import_success = True
 except ImportError as e:
     log_import_success = False
     import_error = e
 
-log = get_logger("tools.executor") # Use get_logger
+log = get_logger("tools.executor") 
 
 # Log the import results immediately
 if log_import_success:

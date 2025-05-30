@@ -1,15 +1,15 @@
 import json
 import logging
 from typing import List, Dict, Any, Optional
-import pprint # For pretty printing dicts during debugging
-import redis # For redis.exceptions
+import pprint 
+import redis 
 import asyncio
 
 import redis.asyncio as aioredis
 from botbuilder.core import Storage, StoreItem
-from pydantic import BaseModel # Ensure this is imported
+from pydantic import BaseModel # GOTTTTAAA make sure this is imported
 
-from config import AppSettings # Assuming AppSettings is accessible
+from config import AppSettings 
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class RedisStorage(Storage):
         self._app_settings = app_settings
         self._redis_client: Optional[aioredis.Redis] = None
         self._is_initializing = False # Flag to prevent re-entrant initialization
-        self._redis_prefix = self._app_settings.redis_prefix # Store prefix for convenience
+        self._redis_prefix = self._app_settings.redis_prefix # Storing prefix for convenience
 
     # --- START: Interface Adapter Methods for ToolCallAdapter ---
     async def get_app_state(self, session_id: str) -> Optional['AppState']:
@@ -120,7 +120,7 @@ class RedisStorage(Storage):
                 # if the first one fails or this check becomes a bottleneck.
                 # However, if _initialize_client is always awaited properly on first use,
                 # this re-entrancy might be less of an issue.
-                return # Or raise RedisStorageError("Initialization in progress")
+                return 
 
             self._is_initializing = True
             try:
@@ -338,43 +338,3 @@ class RedisStorage(Storage):
             finally:
                 self._redis_client = None
 
-# Example usage (for illustration, not part of the class):
-# async def main():
-#     # Assumes REDIS_URL is in your environment or AppSettings
-#     from config import get_config
-#     app_config = get_config()
-
-#     storage = RedisStorage(
-#         redis_url=app_config.settings.redis_url,
-#         host=app_config.settings.redis_host,
-#         port=app_config.settings.redis_port,
-#         password=app_config.settings.redis_password,
-#         db=app_config.settings.redis_db,
-#         ssl=app_config.settings.redis_ssl_enabled
-#     )
-
-#     try:
-#         # Test write
-#         await storage.write({
-#             "user1/state": {"data": "user1_data", "eTag": "1"},
-#             "conversation1/dialog": {"data": "convo1_data", "eTag": "*"}
-#         })
-#         print("Wrote data")
-
-#         # Test read
-#         read_data = await storage.read(["user1/state", "conversation1/dialog", "nonexistent/key"])
-#         print(f"Read data: {read_data}")
-
-#         # Test delete
-#         await storage.delete(["user1/state"])
-#         print("Deleted user1/state")
-
-#         read_again = await storage.read(["user1/state", "conversation1/dialog"])
-#         print(f"Read again: {read_again}")
-
-#     finally:
-#         await storage.close()
-
-# if __name__ == "__main__":
-#     import asyncio
-#     asyncio.run(main()) 

@@ -1116,7 +1116,7 @@ Keep the response concise but informative.
             # The original code had:
             # if not app_state: app_state, _ = await self._get_app_state_and_user(turn_context)
             # if app_state: await self._save_app_state(turn_context, app_state)
-            # This can be kept if there are other state modifications in conversation_update outside members_added.
+            # This could be kept if there are other state modifications in conversation_update outside members_added.
             # For now, assuming the targeted save inside the loop is primary for welcome.
             # If app_state_for_welcome_check was loaded and potentially modified (e.g. initialized), ensure it's saved.
             if app_state_for_welcome_check and not turn_context.responded: # Check if any response was sent this turn
@@ -1129,4 +1129,3 @@ Keep the response concise but informative.
         else:
             self.logger.info(f"Orchestrator received unhandled activity type: {turn_context.activity.type}.")
 
-        # Optionally, send a generic "I can only process messages" or handle other types 
