@@ -334,6 +334,48 @@ def _optimize_message_history(
     return optimized_messages
 
 
+def add_tool_usage_reminder(messages: List[glm.Content]) -> List[glm.Content]:
+    """
+    Add a tool usage reminder to the conversation history to encourage the AI to use available tools
+    This is especially important for models like Gemini that might not consistently apply system instructions
+    
+    Args:
+        messages: List of formatted messages ready for the LLM
+        
+    Returns:
+        List of messages with the tool usage reminder added
+    """
+    if not messages:
+        return messages
+        
+    # Find the last user message position to insert the reminder before it
+    last_user_idx = None
+    for i in range(len(messages)-1, -1, -1):
+        if hasattr(messages[i], 'role') and messages[i].role == 'user':
+            last_user_idx = i
+            break
+            
+    if last_user_idx is None:
+        return messages  # No user message found
+        
+    # Create the tool usage reminder
+    reminder_text = (
+        "IMPORTANT: I should utilize the available tools to help the user when appropriate. "
+        "Available tools include search, weather, and other utilities that can provide real-time information. "
+        "When the user asks for current information, I should always consider using these tools rather than "
+        "saying I don't have access to that information."
+    )
+    
+    reminder_content = glm.Content(
+        role="user", 
+        parts=[glm.Part(text=f"[TOOL REMINDER]: {reminder_text}")]
+    )
+    
+    # Insert before the last user message
+    new_messages = messages[:last_user_idx] + [reminder_content] + messages[last_user_idx:]
+    return new_messages
+
+
 def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_history_items: Optional[int] = None) -> Tuple[List[RuntimeContentType], List[str]]:
     """
     Prepares messages from AppState for LLM consumption using the new Message structure.
@@ -451,17 +493,29 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
         
         if sdk_parts:
             role_for_sdk = msg_dict_from_history.get('role', 'user')
-            if role_for_sdk == "system" and msg_dict_from_history.get("message_type") != "workflow_context_injection": 
-                note = f"Skipping non-contextual system message at index {msg_index}"
-                log.debug(note, extra={"event_type": "skip_system_message"})
-                preparation_notes.append(note)
-                continue
+            
+            # Handle system messages since Gemini doesn't support them directly
+            if role_for_sdk == "system":
+                if msg_dict_from_history.get("message_type") == "workflow_context_injection":
+                    # For workflow context, keep as is but convert to user message
+                    role_for_sdk = "user"
+                    # Prepend context indicator to make it clear this is system information
+                    for part in sdk_parts:
+                        if hasattr(part, 'text') and part.text:
+                            part.text = f"[SYSTEM CONTEXT]: {part.text}"
+                    note = f"Converted workflow context system message to user message at index {msg_index}"
+                    log.debug(note)
+                    preparation_notes.append(note)
+                else:
+                    # For regular system messages, convert to user message with clear system prompt indicator
+                    role_for_sdk = "user"
+                    for part in sdk_parts:
+                        if hasattr(part, 'text') and part.text:
+                            part.text = f"[SYSTEM INSTRUCTION]: You are Aughie, an AI development assistant. {part.text}"
+                    note = f"Converted system message to user message with system instruction prefix at index {msg_index}"
+                    log.debug(note)
+                    preparation_notes.append(note)
             elif role_for_sdk == "function": # Gemini uses 'function' role for tool responses
-                role_for_sdk = "tool" # Standardize to 'tool' if that's what SDK expects for responses
-                                     # However, Google SDK examples use 'function' role for FunctionResponse parts.
-                                     # Let's stick to what the Message model and Pydantic conversion implies.
-                                     # If role was 'tool', we would have converted it to 'function_response' part.
-                                     # Role 'function' is used by Gemini for FunctionResponse content.
                 pass # Keep as 'function' if parts are FunctionResponse as per Gemini examples
 
             try:
@@ -483,6 +537,11 @@ def prepare_messages_for_llm_from_appstate(app_state: AppState, config_max_histo
         note = "Formatted history is empty, but original messages existed. This might indicate all messages were filtered or had issues."
         log.warning(note, extra={"event_type": "empty_formatted_history_with_originals"})
         preparation_notes.append(note)
+
+    # Add tool usage reminder before final user message
+    if formatted_messages:
+        formatted_messages = add_tool_usage_reminder(formatted_messages)
+        preparation_notes.append("Added tool usage reminder to conversation history")
 
     log.debug(
         "Prepared messages for LLM from AppState.",

@@ -8,10 +8,12 @@ import pprint # ADD THIS IMPORT
 
 import google.api_core.exceptions as google_exceptions
 import requests.exceptions  # For _process_llm_stream error handling
-from proto.marshal.collections.maps import MapComposite # Import MapComposite
 
 from state_models import AppState, SessionDebugStats  # SessionDebugStats for _update_session_stats
 from core_logic.text_utils import is_greeting_or_chitchat  # Import the utility function
+
+# Import the robust function_call extraction utility
+from utils.function_call_utils import safe_extract_function_call
 
 # --- SDK Types Setup ---
 SDK_AVAILABLE = False
@@ -27,22 +29,32 @@ class _MockGlmFunctionCall:
 class _MockGlm:
     FunctionCall = _MockGlmFunctionCall
     # Add other types if needed
+    class Part: # Add mock Part for type consistency if SDK not available
+        def __init__(self, text: Optional[str] = None, function_call: Optional['_MockGlmFunctionCall'] = None):
+            self.text = text
+            self.function_call = function_call
+    
+    class Content: # Add mock Content
+        def __init__(self, parts: Optional[List[Any]] = None, role: Optional[str] = None):
+            self.parts = parts or []
+            self.role = role
+
 
 # Define TypeAliases - these will be valid regardless of SDK availability
 ContentType: TypeAlias = Any  # Will be glm.Content or Dict[str, Any]
 GenerateContentResponseType: TypeAlias = Any  # Will be type from SDK or Any
 
-glm: Any = _MockGlm()
+glm: Any = _MockGlm() # Initialize with mock
 
 try:
-    import google.ai.generativelanguage as actual_glm
-    glm = actual_glm  # type: ignore
+    import google.ai.generativelanguage as actual_glm_sdk # Use a distinct name for import
+    glm = actual_glm_sdk  # type: ignore # glm now refers to the SDK module
     SDK_AVAILABLE = True
     # Optional: Configure logging for the SDK
     # sdk_log = logging.getLogger("google.ai.generativelanguage") # Handled by root logger if needed
     # sdk_log.setLevel(logging.WARNING)
 except ImportError:
-    logging.getLogger("core_logic.llm_interactions").info( # Changed to logging.getLogger
+    logging.getLogger("core_logic.llm_interactions").info(
         "google.ai.generativelanguage SDK not found. Using mock glm types for llm_interactions.",
         extra={"event_type": "sdk_not_found", "details": {"sdk_name": "google.ai.generativelanguage"}}
     )
@@ -69,6 +81,132 @@ from .tool_selector import ToolSelector # IMPORT TOOL SELECTOR
 # from utils.logging_config import get_logger # Removed this as we use standard logging now
 
 log = logging.getLogger("core_logic.llm_interactions") # Use standard logging.getLogger
+
+# --- Safe SDK Object Representation for Logging ---
+
+def _format_fc_args_for_safe_repr(args_raw: Any) -> str:
+    """Helper to format function call arguments for _safe_sdk_object_repr_for_log."""
+    fc_args_dict = safe_extract_function_call(args_raw)
+    
+    args_summary = "Args=None"
+    if fc_args_dict is not None:
+        if isinstance(fc_args_dict, dict) and fc_args_dict.get('_unextractable_type'):
+            args_summary = f"Args=[Unextractable:{fc_args_dict['_unextractable_type']}]"
+        elif isinstance(fc_args_dict, dict) and fc_args_dict.get('_error'):
+            args_summary = f"Args=[ErrorExtracting:{fc_args_dict['_error']}]"
+        elif isinstance(fc_args_dict, dict):
+            args_summary = f"ArgsKeys={list(fc_args_dict.keys())}"
+        else:
+            args_summary = f"ArgsType={type(fc_args_dict).__name__}"
+    return args_summary
+
+def _safe_sdk_object_repr_for_log(sdk_obj: Any, max_len: int = 500) -> str:
+    if sdk_obj is None:
+        return "None"
+
+    obj_type_name = type(sdk_obj).__name__
+    parts_to_join = [f"Type={obj_type_name}"]
+
+    try:
+        # --- SDK-Specific Handling (if SDK is available and types match) ---
+        if SDK_AVAILABLE:
+            if isinstance(sdk_obj, glm.FunctionCall):
+                fc_name = getattr(sdk_obj, 'name', '[UnknownFCName]')
+                fc_args_raw = getattr(sdk_obj, 'args', None)
+                args_summary = _format_fc_args_for_safe_repr(fc_args_raw)
+                parts_to_join.append(f"FunctionCall(Name='{fc_name}', {args_summary})")
+                # This is specific enough, join and return
+                final_str_val = ", ".join(parts_to_join)
+                return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
+
+            elif isinstance(sdk_obj, glm.Part):
+                if hasattr(sdk_obj, 'function_call') and sdk_obj.function_call:
+                    # Recursively call for the FunctionCall object within the Part
+                    parts_to_join.append(f"FunctionCall={{{_safe_sdk_object_repr_for_log(sdk_obj.function_call, max_len=150)}}}")
+                if hasattr(sdk_obj, 'text') and sdk_obj.text:
+                    text_preview = sdk_obj.text.replace('\n', ' ')[:70]
+                    text_val = text_preview + ("..." if len(sdk_obj.text) > 70 else "")
+                    parts_to_join.append(f"Text='{text_val}'")
+                if not (hasattr(sdk_obj, 'text') and sdk_obj.text) and \
+                   not (hasattr(sdk_obj, 'function_call') and sdk_obj.function_call):
+                    parts_to_join.append("EmptyPart")
+                # This is specific enough, join and return
+                final_str_val = ", ".join(parts_to_join)
+                return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
+            # Note: glm.Content is also handled by hasattr(sdk_obj, 'parts') below
+
+        # --- Generic Attribute-Based Handling (Covers Mocks and SDK objects if not caught above or SDK unavailable) ---
+        # This section handles objects that look like Parts or Content based on attributes
+        
+        # Check for Part-like attributes
+        is_part_like_by_attr = hasattr(sdk_obj, 'function_call') or hasattr(sdk_obj, 'text')
+
+        if is_part_like_by_attr:
+            if hasattr(sdk_obj, 'function_call') and sdk_obj.function_call:
+                fc_obj = sdk_obj.function_call
+                # If fc_obj is an actual SDK FunctionCall, recurse for safety. Otherwise, format its name/args.
+                if SDK_AVAILABLE and isinstance(fc_obj, glm.FunctionCall):
+                     parts_to_join.append(f"FunctionCallContained={{{_safe_sdk_object_repr_for_log(fc_obj, max_len=150)}}}")
+                else: # Mock FunctionCall or other structure
+                    fc_name = getattr(fc_obj, 'name', '[UnknownFCName]')
+                    fc_args_raw = getattr(fc_obj, 'args', None)
+                    args_summary = _format_fc_args_for_safe_repr(fc_args_raw)
+                    parts_to_join.append(f"FunctionCall(Name='{fc_name}', {args_summary})")
+
+            if hasattr(sdk_obj, 'text') and sdk_obj.text:
+                text_preview = str(sdk_obj.text).replace('\n', ' ')[:70] # Ensure text is string
+                text_val = text_preview + ("..." if len(str(sdk_obj.text)) > 70 else "")
+                parts_to_join.append(f"Text='{text_val}'")
+            
+            if not (hasattr(sdk_obj, 'text') and sdk_obj.text) and \
+               not (hasattr(sdk_obj, 'function_call') and sdk_obj.function_call):
+                 parts_to_join.append("EmptyOrUnknownPartLike")
+
+        # Check for Content-like attributes (e.g., glm.Content, GenerateContentResponse, Chunks)
+        elif hasattr(sdk_obj, 'parts') and isinstance(sdk_obj.parts, list):
+            parts_to_join.append(f"NumParts={len(sdk_obj.parts)}")
+            sub_parts_summary = []
+            for p_idx, p_obj_in_list in enumerate(sdk_obj.parts[:3]): # Limit to 3 for preview
+                sub_parts_summary.append(f"P[{p_idx}]:{{{_safe_sdk_object_repr_for_log(p_obj_in_list, max_len=100)}}}") # Recursive
+            if sub_parts_summary:
+                parts_to_join.append(f"PartsSummary=[{'; '.join(sub_parts_summary)} {'...' if len(sdk_obj.parts) > 3 else ''}]")
+            
+            if hasattr(sdk_obj, 'usage_metadata') and sdk_obj.usage_metadata:
+                um = sdk_obj.usage_metadata
+                total_tokens = getattr(um, 'total_token_count', None)
+                if total_tokens is not None and isinstance(total_tokens, int): # Check type
+                    parts_to_join.append(f"Usage(TotalTokens={total_tokens})")
+                else:
+                    prompt_tokens = getattr(um, 'prompt_token_count', 'N/A')
+                    cand_tokens = getattr(um, 'candidates_token_count', 'N/A')
+                    parts_to_join.append(f"Usage(PromptTokens={prompt_tokens}, CandidateTokens={cand_tokens})")
+        
+        # Handle if sdk_obj is a string itself
+        elif isinstance(sdk_obj, str):
+            final_str_val = sdk_obj.replace('\n', ' ')
+            return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
+        
+        # Fallback if only "Type=..." was added (no specific attributes matched)
+        elif len(parts_to_join) == 1:
+            try:
+                repr_str = repr(sdk_obj) 
+                repr_val = repr_str.replace('\n', ' ')[:60] # Short preview
+                if len(repr_str) > 60: repr_val += "..."
+                parts_to_join.append(f"GenericRepr='{repr_val}'")
+            except Exception:
+                parts_to_join.append("GenericRepr=[ErrorInRepr]")
+        
+        final_str_val = ", ".join(parts_to_join)
+        
+    except Exception as e_repr:
+        error_repr_str_val = "[Error getting str(e_repr)]"
+        try:
+            error_repr_str_val = str(e_repr).replace('\n', ' ')
+        except Exception:
+            pass 
+        final_str_val = f"Type={obj_type_name}, ErrorInSafeRepr='{error_repr_str_val[:100]}...'"
+
+    return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
 
 # --- Co-located Helper Functions ---
 
@@ -404,6 +542,9 @@ def _process_llm_stream(
     Yields:
         Tuple[str, Any]: A tuple where the first element is the type ('text', 'tool_calls', 'debug_info')
                          and the second element is the corresponding data.
+
+    Note:
+        All function_call argument extraction is now handled via safe_extract_function_call for robustness.
     """
     start_time = time.monotonic()
     # Store raw FunctionCall objects as they are assembled across chunks
@@ -422,12 +563,12 @@ def _process_llm_stream(
         for chunk in stream:
             # Log chunk representation safely
             try:
-                chunk_repr = repr(chunk)
+                chunk_repr = _safe_sdk_object_repr_for_log(chunk)
                 raw_chunks_debug.append(
-                    chunk_repr[:500] + ('...' if len(chunk_repr) > 500 else '')
+                    chunk_repr # _safe_sdk_object_repr_for_log already handles max_len
                 )
             except Exception as log_e:
-                raw_chunks_debug.append(f"[Error logging chunk: {log_e}]")
+                raw_chunks_debug.append(f"[Error logging chunk via _safe_sdk_object_repr_for_log: {log_e}]")
 
             # Check for usage metadata (usually at the end)
             if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
@@ -457,7 +598,9 @@ def _process_llm_stream(
                         if part.function_call is None or not isinstance(part.function_call, glm.FunctionCall):
                             log.warning(
                                 "Malformed SDK part: 'function_call' attribute is None or not a glm.FunctionCall object. Skipping.",
-                                extra={"event_type": "malformed_sdk_function_call_part", "details": {"part_type": str(type(part.function_call)), "part_data_preview": str(part)[:200]}}
+                                extra={"event_type": "malformed_sdk_function_call_part", 
+                                       "details": {"part_type": str(type(part.function_call)), 
+                                                   "part_data_preview": _safe_sdk_object_repr_for_log(part, max_len=200)}}
                             )
                             continue
                         fc_part: glm.FunctionCall = part.function_call
@@ -466,56 +609,56 @@ def _process_llm_stream(
                             if call_name not in raw_function_calls:
                                 raw_function_calls[call_name] = glm.FunctionCall(name=call_name, args={})
                                 log.debug(f"Initializing FunctionCall object for '{call_name}'.", extra={"event_type": "function_call_initialized", "details": {"call_name": call_name}})
-                            if hasattr(fc_part, 'args') and fc_part.args:
-                                if not isinstance(raw_function_calls[call_name].args, dict):
-                                    log.warning(f"Resetting non-dict args for {call_name} before update.", extra={"event_type": "function_call_args_reset", "details": {"call_name": call_name, "previous_args_type": str(type(raw_function_calls[call_name].args))}})
-                                    raw_function_calls[call_name].args = {}
-                                if isinstance(fc_part.args, dict):
-                                    raw_function_calls[call_name].args.update(fc_part.args)
-                                elif SDK_AVAILABLE and isinstance(fc_part.args, MapComposite):
-                                    converted_chunk_args = dict(fc_part.args)
-                                    log.debug(f"Chunk's MapComposite args for {call_name} converted to dict.", extra={"event_type": "function_call_args_conversion", "details": {"call_name": call_name, "converted_args": converted_chunk_args}})
-                                    raw_function_calls[call_name].args.update(converted_chunk_args)
-                                elif isinstance(fc_part.args, list):
-                                    for arg_item_idx, arg_item in enumerate(fc_part.args):
-                                        item_to_merge = None
-                                        if isinstance(arg_item, dict): item_to_merge = arg_item
-                                        elif SDK_AVAILABLE and isinstance(arg_item, MapComposite):
-                                            item_to_merge = dict(arg_item)
-                                            log.debug(f"List item MapComposite (idx {arg_item_idx}) for {call_name} converted to dict.", extra={"event_type": "function_call_list_item_conversion", "details": {"call_name": call_name, "item_index": arg_item_idx, "converted_item": item_to_merge}})
-                                        if item_to_merge: raw_function_calls[call_name].args.update(item_to_merge)
-                                        else: log.warning(f"Skipping non-dict/non-MapComposite item in streamed args list for {call_name}.", extra={"event_type": "function_call_skip_invalid_list_item", "details": {"call_name": call_name, "item_index": arg_item_idx, "item_type": str(type(arg_item))}})
-                                else:
-                                    log.warning(
-                                        f"Unexpected streamed fc_part.args format for {call_name}.",
-                                        extra={"event_type": "unexpected_function_call_args_format", "details": {"call_name": call_name, "args_type": str(type(fc_part.args)), "args_preview": str(fc_part.args)[:200]}}
-                                    )
-                            else:
-                                if not hasattr(raw_function_calls[call_name], 'args') or raw_function_calls[call_name].args is None:
-                                    log.debug(f"Initializing missing args for {call_name} with empty dict.", extra={"event_type": "function_call_args_init_empty", "details": {"call_name": call_name}})
-                                    raw_function_calls[call_name].args = {}
+                            # Use the unified utility for argument extraction
+                            raw_function_calls[call_name].args = safe_extract_function_call(getattr(fc_part, 'args', None))
                         else:
                             malformation_details = []
                             if not hasattr(fc_part, 'name'): malformation_details.append("'name' attribute missing")
                             elif not fc_part.name: malformation_details.append(f"'name' attribute is present but empty or invalid (value: {repr(fc_part.name)})")
                             log.warning(
                                 "Skipping malformed glm.FunctionCall part from SDK stream.",
-                                extra={"event_type": "malformed_sdk_function_call_skipped", "details": {"reasons": malformation_details or "Unknown issue", "part_preview": str(fc_part)[:200]}}
+                                extra={"event_type": "malformed_sdk_function_call_skipped", 
+                                       "details": {"reasons": malformation_details or "Unknown issue", 
+                                                   "part_preview": _safe_sdk_object_repr_for_log(fc_part, max_len=200)}}
                             )
                     else:
-                        log.debug(f"Ignoring unknown stream part type: {type(part)}", extra={"event_type": "unknown_stream_part_type", "details": {"part_type": str(type(part))}})
+                        log.debug(f"Ignoring unknown stream part type: {type(part)}", extra={"event_type": "unknown_stream_part_type", "details": {"part_type": str(type(part)), "part_preview": _safe_sdk_object_repr_for_log(part, max_len=100)}}) # Added safe preview
             except StopIteration:
                 log.warning("Stream ended unexpectedly with StopIteration.", extra={"event_type": "stream_stop_iteration"})
                 break
             except AttributeError as e:
-                log.error("Unexpected SDK response structure.", exc_info=True, extra={"event_type": "sdk_structure_error", "details": {"error": str(e), "chunk_preview": str(chunk)[:200]}})
-                raw_chunks_debug.append(f"[SDK structure error: {e}]")
+                error_message_str = "[Error getting str(e) for AttributeError]"
+                try:
+                    error_message_str = str(e)
+                except Exception as str_e_err:
+                    error_message_str = f"[Failed to str(e) for AttributeError: {type(str_e_err).__name__}]"
+                log.error("Unexpected SDK response structure.", exc_info=True, 
+                          extra={"event_type": "sdk_structure_error", 
+                                 "details": {"error_type": type(e).__name__, "error_message": error_message_str, 
+                                             "chunk_preview": _safe_sdk_object_repr_for_log(chunk, max_len=200)}})
+                raw_chunks_debug.append(f"[SDK structure error: {type(e).__name__} - {error_message_str}]")
             except (TypeError, ValueError) as e:
-                log.error("Error parsing chunk data.", exc_info=True, extra={"event_type": "chunk_parsing_error", "details": {"error": str(e), "chunk_preview": str(chunk)[:200]}})
-                raw_chunks_debug.append(f"[Data parsing error: {e}]")
+                error_message_str = "[Error getting str(e) for TypeError/ValueError]"
+                try:
+                    error_message_str = str(e)
+                except Exception as str_e_err:
+                    error_message_str = f"[Failed to str(e) for TypeError/ValueError: {type(str_e_err).__name__}]"
+                log.error("Error parsing chunk data.", exc_info=True, 
+                          extra={"event_type": "chunk_parsing_error", 
+                                 "details": {"error_type": type(e).__name__, "error_message": error_message_str, 
+                                             "chunk_preview": _safe_sdk_object_repr_for_log(chunk, max_len=200)}})
+                raw_chunks_debug.append(f"[Data parsing error: {type(e).__name__} - {error_message_str}]")
             except Exception as e:
-                log.error("Unexpected error processing chunk part.", exc_info=True, extra={"event_type": "chunk_processing_error", "details": {"error": str(e), "chunk_preview": str(chunk)[:200]}})
-                raw_chunks_debug.append(f"[Error processing part: {e}]")
+                error_message_str = "[Error getting str(e) for generic Exception]"
+                try:
+                    error_message_str = str(e)
+                except Exception as str_e_err:
+                    error_message_str = f"[Failed to str(e) for generic Exception: {type(str_e_err).__name__}]"
+                log.error("Unexpected error processing chunk part.", exc_info=True, 
+                          extra={"event_type": "chunk_processing_error", 
+                                 "details": {"error_type": type(e).__name__, "error_message": error_message_str, 
+                                             "chunk_preview": _safe_sdk_object_repr_for_log(chunk, max_len=200)}})
+                raw_chunks_debug.append(f"[Error processing part: {type(e).__name__} - {error_message_str}]")
 
         if not accumulated_text_for_log and not raw_function_calls:
             log.warning("LLM stream finished without generating any text or tool calls.", extra={"event_type": "llm_stream_empty_output"})
@@ -523,18 +666,8 @@ def _process_llm_stream(
         for name, fc in raw_function_calls.items():
             try:
                 args_data = fc.args
-                args_dict_for_serialization = {}
-                if SDK_AVAILABLE and isinstance(args_data, MapComposite):
-                    args_dict_for_serialization = dict(args_data)
-                    log.debug(f"Final args for '{name}' was MapComposite, converted to dict for serialization.", extra={"event_type": "final_args_conversion_mapcomposite", "details": {"tool_name": name, "args_preview": str(args_dict_for_serialization)[:MAX_TOOL_ARG_PREVIEW_LEN]}})
-                elif isinstance(args_data, dict): args_dict_for_serialization = args_data
-                elif args_data is None:
-                    log.warning(f"Function call '{name}' has None for final args. Using empty dict for serialization.", extra={"event_type": "final_args_none", "details": {"tool_name": name}})
-                else:
-                    log.warning(f"Function call '{name}' has unexpected final args type: {type(args_data)}. Attempting dict conversion.", extra={"event_type": "final_args_unexpected_type", "details": {"tool_name": name, "args_type": str(type(args_data))}})
-                    try: args_dict_for_serialization = dict(args_data)
-                    except (TypeError, ValueError):
-                        log.error(f"Could not convert final args of type {type(args_data)} to dict for '{name}'. Using empty.", exc_info=True, extra={"event_type": "final_args_conversion_failed", "details": {"tool_name": name, "args_type": str(type(args_data))}})
+                # Use the unified utility for argument extraction
+                args_dict_for_serialization = safe_extract_function_call(args_data)
                 args_str = _serialize_arguments(args_dict_for_serialization)
                 tool_call_id = _generate_tool_call_id(name)
                 formatted_tool_calls_for_state.append({"id": tool_call_id, "type": "function", "function": {"name": name, "arguments": args_str}})
@@ -543,9 +676,15 @@ def _process_llm_stream(
                     extra={"event_type": "tool_call_formatted_for_state", "details": {"tool_call_id": tool_call_id, "tool_name": name, "args_preview": args_str[:MAX_TOOL_ARG_PREVIEW_LEN]}}
                 )
             except AttributeError as e:
-                log.error("Invalid function call structure after assembly.", exc_info=True, extra={"event_type": "invalid_function_call_structure", "details": {"error": str(e), "function_call_preview": str(fc)[:200]}})
+                log.error("Invalid function call structure after assembly.", exc_info=True, 
+                          extra={"event_type": "invalid_function_call_structure", 
+                                 "details": {"error": str(e), 
+                                             "function_call_preview": _safe_sdk_object_repr_for_log(fc, max_len=200)}})
             except (TypeError, ValueError) as e:
-                log.error("Error formatting final function call arguments.", exc_info=True, extra={"event_type": "function_call_args_formatting_error", "details": {"error": str(e), "args_preview": str(getattr(fc, 'args', 'N/A'))[:200]}})
+                log.error("Error formatting final function call arguments.", exc_info=True, 
+                          extra={"event_type": "function_call_args_formatting_error", 
+                                 "details": {"error": str(e), 
+                                             "args_preview": _safe_sdk_object_repr_for_log(getattr(fc, 'args', 'N/A'), max_len=200)}})
 
         if needs_result_synthesis and has_tool_results and tool_results:
             synthesis_text = "\n\nAdditional context from tool results:\n"
@@ -634,14 +773,28 @@ def _process_llm_stream(
         yield ("debug_info", debug_info)
         yield ("text", f"[Stream Processing Error: Network Error - {str(e)}]")
     except Exception as e:
-        error_msg = f"Fatal error during LLM stream processing: {e}"
-        log.exception(error_msg, extra={"event_type": "fatal_error_stream_processing"})
+        # Create a safe error message that won't cause cascading issues if e contains SDK objects
+        error_msg = "Fatal error during LLM stream processing"
+        error_details = "[Error getting exception details]"
+        try:
+            error_details = str(e)
+        except Exception as str_e:
+            try:
+                error_details = f"Error contains unstringifiable object of type {type(e).__name__}"
+            except Exception:
+                pass  # Keep default error_details message
+            
+        log.exception(f"{error_msg}: {error_details}", extra={"event_type": "fatal_error_stream_processing"})
         debug_info = {
-            "stream_duration_ms": int((time.monotonic() - start_time) * 1000), "error": error_msg, "error_type": "UnexpectedStreamError",
-            "raw_chunk_count": len(raw_chunks_debug), "usage_metadata": usage_metadata
+            "stream_duration_ms": int((time.monotonic() - start_time) * 1000), 
+            "error": error_msg, 
+            "error_type": "UnexpectedStreamError",
+            "error_details": error_details,
+            "raw_chunk_count": len(raw_chunks_debug), 
+            "usage_metadata": usage_metadata
         }
         yield ("debug_info", debug_info)
-        yield ("text", f"[Stream Processing Error: {str(e)}]")
+        yield ("text", f"[Stream Processing Error: {error_details}]")
 
 
 def _handle_llm_api_error(
@@ -752,10 +905,37 @@ def _perform_llm_interaction(
     
     final_tool_definitions = available_tool_definitions
 
+    # Determine if tools should be provided and prepare them
+    provide_tools_flag = _should_provide_tools(is_initial_decision_call, stage_name, user_query)
+    
+    final_tool_definitions = _prepare_tool_definitions(
+        available_tool_definitions=llm.get_tool_manager().get_all_tool_definitions() if llm.get_tool_manager() else [], # Get fresh tools
+        is_initial_decision_call=is_initial_decision_call,
+        provide_tools=provide_tools_flag,
+        user_query=user_query,
+        config=config,
+        app_state=app_state
+    )
+    
     # --- START OF NEW LOGGING ---
+    # Safely log history and tools
+    history_preview_for_log = [_safe_sdk_object_repr_for_log(msg, max_len=300) for msg in current_llm_history]
+    tools_preview_for_log = "None"
+    if final_tool_definitions:
+        try:
+            # Assuming tool definitions are simple dicts/JSON-like, pprint should be safe.
+            # If they could contain complex SDK objects, this would need similar safe repr treatment.
+            tools_preview_for_log = pprint.pformat([
+                {k: (v if not isinstance(v, (dict, list)) else "COMPLEX_VALUE") for k, v in tool.items()} 
+                for tool in final_tool_definitions
+            ]) # Basic preview of tool names and top-level keys
+        except Exception:
+            tools_preview_for_log = "[Error formatting tools for log]"
+
+
     log.debug(
         f"LLM interaction starting: cycle={cycle_num}, initial_call={is_initial_decision_call}, "
-        f"stage={stage_name}, tools_count={len(final_tool_definitions) if final_tool_definitions else 0}",
+        f"stage={stage_name}, tools_count={len(final_tool_definitions) if final_tool_definitions else 0}, provide_tools_flag={provide_tools_flag}",
         extra={
             "event_type": "llm_interaction_start_debug", 
             "details": {
@@ -764,8 +944,8 @@ def _perform_llm_interaction(
                 "stage_name": stage_name,
                 "tools_provided_count": len(final_tool_definitions) if final_tool_definitions else 0,
                 "user_query_preview": user_query[:150] if user_query else None,
-                "history_sent_to_llm": pprint.pformat(current_llm_history),
-                "tools_sent_to_llm": pprint.pformat(final_tool_definitions) 
+                "history_sent_to_llm_preview": history_preview_for_log, # Use the safe repr list
+                "tools_sent_to_llm_structure_preview": tools_preview_for_log 
             }
         }
     )

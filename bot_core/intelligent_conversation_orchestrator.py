@@ -400,30 +400,33 @@ class IntelligentConversationOrchestrator:
                                         res = await turn_context.send_activity(MessageFactory.text(updated_text))
                                         last_activity_id_to_update = res.id if res else None
                                         final_bot_message_sent_this_llm_turn = True
-                                        accumulated_text_response = [updated_text] # Reset for next potential update
+                                        accumulated_text_response = []  # Clear after sending new message
                                 else:
                                     # Text is too long for reliable updates, send as new message
                                     self.logger.info(f"Orchestrator: Streaming text too long ({len(updated_text)} chars), sending as new message.")
                                     res = await turn_context.send_activity(MessageFactory.text(updated_text))
                                     last_activity_id_to_update = res.id if res else None
                                     final_bot_message_sent_this_llm_turn = True
-                                    accumulated_text_response = [updated_text] # Reset
+                                    accumulated_text_response = []  # Clear after sending new message
                         elif accumulated_text_response: # No activity to update, send new if there's content
-                            updated_text = "".join(accumulated_text_response)
-                            res = await turn_context.send_activity(MessageFactory.text(updated_text))
-                            last_activity_id_to_update = res.id if res else None
-                            final_bot_message_sent_this_llm_turn = True
-                            accumulated_text_response = [] # Reset
+                            updated_text = "".join(accumulated_text_response).strip()
+                            if updated_text:  # Only send if there's actual content
+                                res = await turn_context.send_activity(MessageFactory.text(updated_text))
+                                last_activity_id_to_update = res.id if res else None
+                                final_bot_message_sent_this_llm_turn = True
+                                accumulated_text_response = [] # Clear after sending
                 elif event_type == "tool_calls":
                     if isinstance(event_content, list):
                         tool_calls_received.extend(event_content)
                         self.logger.info(f"Orchestrator: LLM requested {len(event_content)} tool_calls: {[tc.get('function',{}).get('name') for tc in event_content]}")
                     # If there was text before tool_calls, send it as a separate message
                     if accumulated_text_response:
-                        await turn_context.send_activity(MessageFactory.text("".join(accumulated_text_response).strip()))
-                        accumulated_text_response = []
-                        final_bot_message_sent_this_llm_turn = True 
-                        last_activity_id_to_update = None # New message was sent
+                        updated_text = "".join(accumulated_text_response).strip()
+                        if updated_text:  # Only send if there's actual content
+                            await turn_context.send_activity(MessageFactory.text(updated_text))
+                            accumulated_text_response = []  # Clear after sending
+                            final_bot_message_sent_this_llm_turn = True 
+                            last_activity_id_to_update = None # New message was sent
                 elif event_type == "error":
                     self.logger.error(f"Orchestrator: Error event from LLM stream: {event_content}")
                     err_text_for_user = "I encountered an issue with my AI core."

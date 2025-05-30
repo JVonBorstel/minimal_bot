@@ -1,20 +1,22 @@
 # --- FILE: llm_interface.py ---
 import logging
-from typing import List, Dict, Any, Optional, Iterable, Union, TypeAlias, TYPE_CHECKING, AsyncIterable
+import os
+import uuid
 import time
+import json
+import hashlib
 import re
 import asyncio
 import random
-import uuid
-import hashlib
-import json
+from typing import Dict, List, Any, Optional, Union, TypeVar, AsyncIterable, Callable, Tuple, cast
+from typing import Iterable, TypeAlias, TYPE_CHECKING
 
 # Use google.api_core.exceptions for specific API errors
 from google.api_core import exceptions as google_exceptions
 from requests import exceptions as requests_exceptions
 
-# Import the main Config class for type hinting and settings access
-from config import Config # Assuming Config class is available
+# Import the config module
+from config import Config, get_config
 
 # Import text utility functions
 from core_logic.text_utils import is_greeting_or_chitchat
@@ -25,10 +27,93 @@ from state_models import AppState
 # Import logging utilities
 from utils.logging_config import get_logger, start_llm_call, clear_llm_call_id
 from utils.log_sanitizer import sanitize_data
-from config import get_config # To access log_llm_interaction flag
+
+# Import function call utility
+from utils.function_call_utils import safe_extract_function_call
+
+# --- Safe SDK Object Representation for Logging ---
+def _safe_sdk_object_repr_for_log(sdk_obj: Any, max_len: int = 500) -> str:
+    """Safely convert SDK objects to string representations for logging purposes."""
+    if sdk_obj is None:
+        return "None"
+
+    obj_type_name = type(sdk_obj).__name__
+    parts_to_join = [f"Type={obj_type_name}"]
+
+    try:
+        # Handle SDK-specific types
+        if SDK_AVAILABLE:
+            # Handle Function Calls (the problematic type)
+            if isinstance(sdk_obj, glm.FunctionCall):
+                fc_name = getattr(sdk_obj, 'name', '[UnknownName]')
+                # Safely extract arguments
+                try:
+                    args_dict = safe_extract_function_call(getattr(sdk_obj, 'args', None))
+                    args_summary = f"Args={list(args_dict.keys()) if args_dict else 'None'}"
+                except Exception:
+                    args_summary = "Args=[ExtractionError]"
+                
+                parts_to_join.append(f"FunctionCall(Name='{fc_name}', {args_summary})")
+                final_str_val = ", ".join(parts_to_join)
+                return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
+
+            # Handle Parts with potential function calls
+            elif isinstance(sdk_obj, glm.Part):
+                if hasattr(sdk_obj, 'function_call') and sdk_obj.function_call:
+                    parts_to_join.append("HasFunctionCall=True")
+                if hasattr(sdk_obj, 'text') and sdk_obj.text:
+                    text_preview = sdk_obj.text.replace('\n', ' ')[:70]
+                    text_val = text_preview + ("..." if len(sdk_obj.text) > 70 else "")
+                    parts_to_join.append(f"Text='{text_val}'")
+
+        # Handle list of objects
+        if isinstance(sdk_obj, list):
+            parts_to_join.append(f"ListLen={len(sdk_obj)}")
+            
+        # Handle objects with parts
+        elif hasattr(sdk_obj, 'parts') and isinstance(sdk_obj.parts, list):
+            parts_to_join.append(f"NumParts={len(sdk_obj.parts)}")
+        
+        # Simple string representation for other types
+        elif isinstance(sdk_obj, (str, int, float, bool)):
+            str_val = str(sdk_obj).replace('\n', ' ')
+            return str_val[:max_len-3] + "..." if len(str_val) > max_len else str_val
+        
+        final_str_val = ", ".join(parts_to_join)
+        return final_str_val[:max_len-3] + "..." if len(final_str_val) > max_len else final_str_val
+        
+    except Exception as e:
+        return f"Type={obj_type_name}, SafeReprError='{str(e)[:100]}'"
+
+def _safe_log_debug(logger, message: str, obj: Any, obj_name: str = "object", llm_call_id: str = None) -> None:
+    """
+    Safely log an object with proper error handling to prevent logging errors from crashing the application.
+    
+    Args:
+        logger: The logger to use
+        message: The log message template (should contain {safe_repr} where object representation should go)
+        obj: The object to log
+        obj_name: Name of the object for error messages
+        llm_call_id: Optional LLM call ID for context
+    """
+    try:
+        # First try to use our safe repr function
+        safe_repr = _safe_sdk_object_repr_for_log(obj, max_len=500)
+        id_prefix = f"LLM Call [{llm_call_id}] - " if llm_call_id else ""
+        logger.debug(f"{id_prefix}{message.format(safe_repr=safe_repr)}")
+    except Exception as log_err:
+        # If that fails, log the error instead
+        id_prefix = f"LLM Call [{llm_call_id}] - " if llm_call_id else ""
+        logger.debug(f"{id_prefix}Failed to log {obj_name} details: {log_err}")
 
 # --- SDK Types Setup ---
 SDK_AVAILABLE = False
+
+# Try to import MapComposite for robust type handling
+try:
+    from proto.marshal.collections.maps import MapComposite
+except ImportError:
+    MapComposite = None
 
 # Define TypeAliases to Any. These will be the primary aliases used in the code.
 GenerativeModelType: TypeAlias = Any
@@ -85,6 +170,65 @@ except ImportError:
 
 log = get_logger("llm_interface") # Use get_logger
 
+def safe_extract_function_call(function_call_obj: Any) -> dict:
+    """
+    Safely extracts a plain dict from any Gemini function_call object, handling all known types.
+    Never calls str() or repr() on unknown objects. Only logs types and attribute names.
+    Returns a dict, or an empty dict if unprocessable.
+    """
+    if function_call_obj is None:
+        return {}
+    # If already a dict
+    if isinstance(function_call_obj, dict):
+        return function_call_obj
+    # If MapComposite (SDK type)
+    if MapComposite and isinstance(function_call_obj, MapComposite):
+        try:
+            return dict(function_call_obj)
+        except Exception:
+            return {"_error": "MapComposite conversion failed"}
+    # If has to_dict()
+    if hasattr(function_call_obj, 'to_dict') and callable(getattr(function_call_obj, 'to_dict')):
+        try:
+            return function_call_obj.to_dict()
+        except Exception:
+            return {"_error": "to_dict() failed"}
+    # If JSON string
+    if isinstance(function_call_obj, str):
+        try:
+            import json
+            return json.loads(function_call_obj)
+        except Exception:
+            return {"_original": function_call_obj}
+    # If has __dict__
+    if hasattr(function_call_obj, '__dict__'):
+        try:
+            # Only include serializable values
+            return {
+                k: v for k, v in function_call_obj.__dict__.items()
+                if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+            }
+        except Exception:
+            return {"_error": "__dict__ extraction failed"}
+    # Fallback: extract all non-callable, non-private attributes
+    try:
+        props = {}
+        for attr in dir(function_call_obj):
+            if not attr.startswith('_') and not callable(getattr(function_call_obj, attr, None)):
+                try:
+                    val = getattr(function_call_obj, attr)
+                    if isinstance(val, (str, int, float, bool, list, dict, type(None))):
+                        props[attr] = val
+                    else:
+                        props[attr] = f"<{type(val).__name__}>"
+                except Exception:
+                    props[attr] = "<error>"
+        if props:
+            return props
+    except Exception:
+        pass
+    # If all else fails
+    return {"_unextractable_type": type(function_call_obj).__name__}
 
 class LLMInterface:
     """
@@ -123,18 +267,42 @@ class LLMInterface:
             genai.configure(api_key=self.api_key)
             log.info(f"google-genai SDK configured successfully. Default Model: {self.model_name}, Request Timeout: {self.timeout}s")
             
-            # Try to create model with system instruction first
-            try:
+            # Set standard model parameters
+            self.generation_config = {
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 32,
+                "max_output_tokens": 1024
+            }
+            
+            # Check if this model supports system instructions
+            supports_system_instructions = any(
+                model_name in self.model_name 
+                for model_name in ["gemini-1.5", "gemini-pro"]
+            )
+            
+            if supports_system_instructions:
+                try:
+                    self.model = genai.GenerativeModel(
+                        self.model_name,
+                        system_instruction=self.config.DEFAULT_SYSTEM_PROMPT,
+                        generation_config=self.generation_config
+                    )
+                    log.info(f"Model {self.model_name} initialized with system instruction")
+                except Exception as e:
+                    log.warning(f"Failed to create model with system_instruction: {e}. Creating without system instruction.")
+                    self.model = genai.GenerativeModel(
+                        self.model_name,
+                        generation_config=self.generation_config
+                    )
+                    log.info(f"Model {self.model_name} initialized without system instruction")
+            else:
+                # For models that don't support system instructions
                 self.model = genai.GenerativeModel(
                     self.model_name,
-                    system_instruction=self.config.DEFAULT_SYSTEM_PROMPT
+                    generation_config=self.generation_config
                 )
-                log.info("Model initialized with system instruction")
-            except Exception as e:
-                # If system_instruction fails, create model without it
-                log.warning(f"Failed to create model with system_instruction: {e}. Creating without system instruction.")
-                self.model = genai.GenerativeModel(self.model_name)
-                log.info("Model initialized without system instruction")
+                log.info(f"Model {self.model_name} initialized without system instruction (not supported)")
                 
         except google_exceptions.GoogleAPIError as e:
             log.error(f"google-genai SDK configuration failed: {e}", exc_info=True)
@@ -160,18 +328,34 @@ class LLMInterface:
         prev_model_name = self.model_name
         
         try:
-            # Try to create model with system instruction first
-            try:
+            # Check if this model supports system instructions
+            supports_system_instructions = any(
+                model_name_pattern in model_name 
+                for model_name_pattern in ["gemini-1.5", "gemini-pro"]
+            )
+            
+            if supports_system_instructions:
+                try:
+                    self.model = genai.GenerativeModel(
+                        model_name,
+                        system_instruction=self.config.DEFAULT_SYSTEM_PROMPT,
+                        generation_config=self.generation_config
+                    )
+                    log.debug(f"Model {model_name} updated with system instruction")
+                except Exception as e:
+                    log.warning(f"Failed to update model with system_instruction: {e}. Creating without system instruction.")
+                    self.model = genai.GenerativeModel(
+                        model_name,
+                        generation_config=self.generation_config
+                    )
+                    log.debug(f"Model {model_name} updated without system instruction")
+            else:
+                # For models that don't support system instructions
                 self.model = genai.GenerativeModel(
                     model_name,
-                    system_instruction=self.config.DEFAULT_SYSTEM_PROMPT
+                    generation_config=self.generation_config
                 )
-                log.debug("Model updated with system instruction")
-            except Exception as e:
-                # If system_instruction fails, create model without it
-                log.warning(f"Failed to update model with system_instruction: {e}. Creating without system instruction.")
-                self.model = genai.GenerativeModel(model_name)
-                log.debug("Model updated without system instruction")
+                log.debug(f"Model {model_name} updated without system instruction (not supported)")
                 
             self.model_name = model_name
             log.info(f"Successfully updated LLM client to use model: {self.model_name}")
@@ -841,9 +1025,17 @@ class LLMInterface:
             try:
                 log.info(f"LLM Call [{llm_call_id}] - Attempt {attempt + 1}/{max_retries + 1} to call generate_content.")
                 if get_config().settings.log_llm_interaction: # Check if full logging is enabled
-                    log.debug(f"LLM Call [{llm_call_id}] - Request Messages: {sanitize_data(messages)}")
-                    if prepared_tools_sdk:
-                        log.debug(f"LLM Call [{llm_call_id}] - Request Tools: {sanitize_data(prepared_tools_sdk)}")
+                    try:
+                        # Log messages
+                        messages_repr = _safe_sdk_object_repr_for_log(messages, max_len=500) 
+                        log.debug(f"LLM Call [{llm_call_id}] - Request Messages: {messages_repr}")
+                        
+                        # Log tools if present
+                        if prepared_tools_sdk:
+                            tools_repr = _safe_sdk_object_repr_for_log(prepared_tools_sdk, max_len=400)
+                            log.debug(f"LLM Call [{llm_call_id}] - Request Tools: {tools_repr}")
+                    except Exception as log_err:
+                        log.debug(f"LLM Call [{llm_call_id}] - Failed to log request details")
                 
                 # Ensure messages are in the correct format (glm.Content if not dicts)
                 sdk_messages = []
@@ -878,39 +1070,510 @@ class LLMInterface:
 
                 for part_response in api_response_stream:
                     if get_config().settings.log_llm_interaction:
-                        log.debug(f"LLM Call [{llm_call_id}] - Stream Part Received: {sanitize_data(part_response)}")
+                        # Use our safe representation function instead of sanitize_data
+                        try:
+                            safe_part_repr = _safe_sdk_object_repr_for_log(part_response, max_len=400)
+                            log.debug(f"LLM Call [{llm_call_id}] - Stream Part: {safe_part_repr}")
+                        except Exception as log_err:
+                            log.debug(f"LLM Call [{llm_call_id}] - Stream Part received (logging failed)")
                     
-                    # Process streaming response parts carefully
-                    # Check if there's text content first
-                    if hasattr(part_response, 'text') and part_response.text:
-                        event_to_yield = {"type": "text_chunk", "content": part_response.text}
+                    # More robust handling of different response types
+                    # First check what type of response we received
+                    try:
+                        if hasattr(part_response, 'text') and part_response.text:
+                            # Text content
+                            part_content = part_response.text
+                            event_to_yield = {"type": "text_chunk", "content": part_content}
+                            all_chunks_for_cache.append(event_to_yield)
+                            yield event_to_yield
+                        elif hasattr(part_response, 'candidates') and part_response.candidates:
+                            # If we have candidates, process them
+                            for candidate in part_response.candidates:
+                                if hasattr(candidate, 'content') and candidate.content:
+                                    if hasattr(candidate.content, 'parts'):
+                                        for part in candidate.content.parts:
+                                            # CRITICAL FIX: Handle ALL types of parts safely
+                                            try:
+                                                # Handle text part
+                                                if hasattr(part, 'text') and part.text:
+                                                    event_to_yield = {"type": "text_chunk", "content": part.text}
+                                                    all_chunks_for_cache.append(event_to_yield)
+                                                    yield event_to_yield
+                                                # Handle function call part - robust handling
+                                                elif hasattr(part, 'function_call'):
+                                                    # Prevent the "Could not convert to text" error by safely handling the function_call
+                                                    if part.function_call is None:
+                                                        log.warning(f"LLM Call [{llm_call_id}] - Empty function_call object found, skipping")
+                                                        continue
+                                                        
+                                                    try:
+                                                        # ENHANCED: Don't try to log the object directly
+                                                        # Only log primitive properties safely
+                                                        fc_obj = part.function_call
+                                                        if get_config().settings.log_llm_interaction:
+                                                            fc_type = type(fc_obj).__name__
+                                                            fc_attrs = []
+                                                            
+                                                            # Safely collect attribute names without accessing values
+                                                            try:
+                                                                fc_attrs = [
+                                                                    attr for attr in dir(fc_obj) 
+                                                                    if not attr.startswith('_') and not callable(getattr(fc_obj, attr, None))
+                                                                ]
+                                                            except Exception:
+                                                                pass
+                                                                            
+                                                            log.debug(f"LLM Call [{llm_call_id}] - function_call object type: {fc_type}")
+                                                            log.debug(f"LLM Call [{llm_call_id}] - function_call available attributes: {fc_attrs}")
+                                                        
+                                                        function_name = None
+                                                        function_args = {}
+                                                        
+                                                        # Extract function name safely
+                                                        if hasattr(part.function_call, 'name'):
+                                                            function_name = part.function_call.name
+                                                        
+                                                        # Extract arguments safely - handling ALL possible formats
+                                                        if hasattr(part.function_call, 'args'):
+                                                            args_obj = part.function_call.args
+                                                            
+                                                            # Case 1: args is already a dict
+                                                            if isinstance(args_obj, dict):
+                                                                function_args = args_obj
+                                                            # Case 2: args has a to_dict() method
+                                                            elif hasattr(args_obj, 'to_dict'):
+                                                                try:
+                                                                    function_args = args_obj.to_dict()
+                                                                except Exception as dict_err:
+                                                                    log.warning(f"LLM Call [{llm_call_id}] - Error calling to_dict(): {dict_err}")
+                                                                    # Fallback to attribute extraction
+                                                                    try:
+                                                                        function_args = {
+                                                                            attr: getattr(args_obj, attr) 
+                                                                            for attr in dir(args_obj) 
+                                                                            if not attr.startswith('_') and not callable(getattr(args_obj, attr))
+                                                                        }
+                                                                    except Exception:
+                                                                        function_args = {"_extraction_failed": True}
+                                                            # Case 3: args is a JSON-formatted string
+                                                            elif isinstance(args_obj, str):
+                                                                try:
+                                                                    import json
+                                                                    function_args = json.loads(args_obj)
+                                                                except json.JSONDecodeError:
+                                                                    log.warning(f"LLM Call [{llm_call_id}] - Could not parse function arguments as JSON: {args_obj[:100] if len(args_obj) > 100 else args_obj}")
+                                                                    function_args = {"_original_args": args_obj}
+                                                            # Case 4: args is some other object - try to extract attributes
+                                                            else:
+                                                                log.warning(f"LLM Call [{llm_call_id}] - Function args in unknown format: {type(args_obj)}")
+                                                                try:
+                                                                    # Try to safely extract attributes
+                                                                    props = {}
+                                                                    for attr in dir(args_obj):
+                                                                        if not attr.startswith('_') and not callable(getattr(args_obj, attr, None)):
+                                                                            try:
+                                                                                # Try to get each attribute individually
+                                                                                val = getattr(args_obj, attr)
+                                                                                # Only include values that are likely to be JSON serializable
+                                                                                if val is None or isinstance(val, (str, int, float, bool, list, dict)):
+                                                                                    props[attr] = val
+                                                                                else:
+                                                                                    props[attr] = f"<{type(val).__name__}>"
+                                                                            except Exception:
+                                                                                props[attr] = "<error>"
+                                                                    
+                                                                    if props:
+                                                                        function_args = props
+                                                                    else:
+                                                                        function_args = {"_no_extractable_props": True}
+                                                                except Exception:
+                                                                    function_args = {"_extraction_failed": True}
+                                                        # NEW: Extract any property found in function_call if neither args nor arguments exists
+                                                        elif not hasattr(part.function_call, 'args') and not hasattr(part.function_call, 'arguments'):
+                                                            log.warning(f"LLM Call [{llm_call_id}] - function_call has neither 'args' nor 'arguments' attributes")
+                                                            # Last resort - extract all non-callable attributes with safeguards
+                                                            try:
+                                                                # First, collect property names without accessing values
+                                                                prop_names = [
+                                                                    attr for attr in dir(part.function_call) 
+                                                                    if not attr.startswith('_') and not callable(getattr(part.function_call, attr, None))
+                                                                    and attr != 'name'  # Exclude name as we handle it separately
+                                                                ]
+                                                                
+                                                                # Now safely extract each property
+                                                                extracted_props = {}
+                                                                for prop in prop_names:
+                                                                    try:
+                                                                        val = getattr(part.function_call, prop)
+                                                                        # Only include values that are likely to be JSON serializable
+                                                                        if val is None or isinstance(val, (str, int, float, bool, list, dict)):
+                                                                            extracted_props[prop] = val
+                                                                        else:
+                                                                            extracted_props[prop] = f"<{type(val).__name__}>"
+                                                                    except Exception:
+                                                                        extracted_props[prop] = "<error>"
+                                                                    
+                                                                # If we found any properties, use them
+                                                                if extracted_props:
+                                                                    log.info(f"LLM Call [{llm_call_id}] - Extracted properties from function_call: {list(extracted_props.keys())}")
+                                                                    function_args = extracted_props
+                                                                else:
+                                                                    function_args = {"_no_extractable_props": True}
+                                                            except Exception as e:
+                                                                log.error(f"LLM Call [{llm_call_id}] - Failed to extract properties from function_call: {e}")
+                                                                function_args = {"_extraction_failed": True}
+                                                        # NEW: Add a fallback if function_name is still None
+                                                        if function_name is None and hasattr(part.function_call, 'function_name'):
+                                                            function_name = part.function_call.function_name
+                                                            log.info(f"LLM Call [{llm_call_id}] - Used fallback 'function_name' property")
+                                                        
+                                                        # Proceed if we have a valid function name
+                                                        if function_name:
+                                                            tool_call = {
+                                                                "id": f"tc_{uuid.uuid4().hex[:8]}",
+                                                                "function": {
+                                                                    "name": function_name,
+                                                                    "arguments": function_args
+                                                                }
+                                                            }
+                                                            event_to_yield = {"type": "tool_calls", "content": [tool_call]}
+                                                            all_chunks_for_cache.append(event_to_yield)
+                                                            yield event_to_yield
+                                                            log.info(f"LLM Call [{llm_call_id}] - Successfully processed tool call to {function_name}")
+                                                        else:
+                                                            log.warning(f"LLM Call [{llm_call_id}] - Function call without name, skipping")
+                                                    except Exception as fc_err:
+                                                        # Enhanced error reporting with detailed information about the function_call object
+                                                        log.error(f"LLM Call [{llm_call_id}] - Error processing function call: {fc_err}", exc_info=True)
+                                                        log.error(f"LLM Call [{llm_call_id}] - function_call object type: {type(part.function_call)}")
+                                                        
+                                                        # CRITICAL FIX: NEVER try to convert the whole object to string
+                                                        # Instead, collect available property names and report them
+                                                        try:
+                                                            # Get safe debug info
+                                                            debug_props = {
+                                                                "error_type": type(fc_err).__name__,
+                                                                "error_message": str(fc_err),
+                                                                "function_call_type": type(part.function_call).__name__,
+                                                            }
+                                                            
+                                                            # Safely list attribute names only
+                                                            try:
+                                                                # Only collect names, do not access values
+                                                                props = [
+                                                                    prop for prop in dir(part.function_call) 
+                                                                    if not prop.startswith('_') and not callable(getattr(part.function_call, prop, None))
+                                                                ]
+                                                                debug_props["available_props"] = props
+                                                            except Exception as prop_err:
+                                                                debug_props["prop_error"] = str(prop_err)
+                                                            
+                                                            log.error(f"LLM Call [{llm_call_id}] - function_call debug info: {debug_props}")
+                                                        except Exception as debug_err:
+                                                            log.error(f"LLM Call [{llm_call_id}] - Failed to create debug info: {debug_err}")
+                                                        
+                                                        # Instead of failing completely, create a fallback error event
+                                                        error_event = {
+                                                            "type": "error",
+                                                            "content": {
+                                                                "code": "FUNCTION_CALL_PARSE_ERROR",
+                                                                "message": f"Could not process function call: {fc_err}"
+                                                            }
+                                                        }
+                                                        all_chunks_for_cache.append(error_event)
+                                                        yield error_event
+                                            except Exception as part_err:
+                                                log.error(f"LLM Call [{llm_call_id}] - Error processing content part: {part_err}")
+                                                # Don't attempt to log the object directly - create a safe debug representation
+                                                try:
+                                                    # Defensive object inspection - don't use str() directly
+                                                    obj_type = type(part)
+                                                    obj_has_function_call = hasattr(part, 'function_call')
+                                                    
+                                                    debug_info = {
+                                                        "object_type": str(obj_type),
+                                                        "has_function_call": obj_has_function_call,
+                                                        "error_type": str(type(part_err)),
+                                                        "error_msg": str(part_err)
+                                                    }
+                                                    
+                                                    if obj_has_function_call and part.function_call is not None:
+                                                        # Safely extract function_call properties without string conversion
+                                                        fc_props = {}
+                                                        
+                                                        # Add safe property checks
+                                                        if hasattr(part.function_call, 'name'):
+                                                            fc_props["has_name"] = True
+                                                        if hasattr(part.function_call, 'args'):
+                                                            fc_props["has_args"] = True
+                                                        if hasattr(part.function_call, 'arguments'):
+                                                            fc_props["has_arguments"] = True
+                                                            
+                                                        debug_info["function_call_info"] = fc_props
+                                                    
+                                                    log.error(f"LLM Call [{llm_call_id}] - Debug info for failed part: {debug_info}")
+                                                except Exception as debug_err:
+                                                    log.error(f"LLM Call [{llm_call_id}] - Failed to create debug info: {debug_err}")
+                                                
+                                                # Continue processing other parts instead of failing completely
+                                                error_event = {
+                                                    "type": "error",
+                                                    "content": {
+                                                        "code": "STREAM_PROCESSING_ERROR", 
+                                                        "message": f"Error processing stream part: {part_err}"
+                                                    }
+                                                }
+                                                all_chunks_for_cache.append(error_event)
+                                                yield error_event
+                        # Handle direct function calls outside candidates
+                        elif hasattr(part_response, 'function_call'):
+                            # Same robust approach for direct function calls
+                            try:
+                                if part_response.function_call is None:
+                                    log.warning(f"LLM Call [{llm_call_id}] - Empty direct function_call object found, skipping")
+                                    continue
+                                    
+                                # Add debug logging for direct function_call object
+                                if get_config().settings.log_llm_interaction:
+                                    log.debug(f"LLM Call [{llm_call_id}] - Direct function_call object type: {type(part_response.function_call)}")
+                                    log.debug(f"LLM Call [{llm_call_id}] - Direct function_call dir: {dir(part_response.function_call)}")
+                                
+                                function_name = None
+                                function_args = {}
+                                
+                                # Extract function name safely
+                                if hasattr(part_response.function_call, 'name'):
+                                    function_name = part_response.function_call.name
+                                
+                                # Extract arguments safely - handling ALL possible formats
+                                if hasattr(part_response.function_call, 'args'):
+                                    args_obj = part_response.function_call.args
+                                    
+                                    # Case 1: args is already a dict
+                                    if isinstance(args_obj, dict):
+                                        function_args = args_obj
+                                    # Case 2: args has a to_dict() method
+                                    elif hasattr(args_obj, 'to_dict'):
+                                        function_args = args_obj.to_dict()
+                                    # Case 3: args is a JSON-formatted string
+                                    elif isinstance(args_obj, str):
+                                        try:
+                                            import json
+                                            function_args = json.loads(args_obj)
+                                        except json.JSONDecodeError:
+                                            log.warning(f"LLM Call [{llm_call_id}] - Could not parse direct function args as JSON: {args_obj[:100]}")
+                                            function_args = {"raw_args": args_obj}
+                                    # Case 4: args is some other object - try to extract attributes
+                                    else:
+                                        log.warning(f"LLM Call [{llm_call_id}] - Direct function args in unknown format: {type(args_obj)}")
+                                        try:
+                                            # Try to convert to dictionary by getting all attributes
+                                            function_args = {attr: getattr(args_obj, attr) 
+                                                           for attr in dir(args_obj) 
+                                                           if not attr.startswith('_') and not callable(getattr(args_obj, attr))}
+                                            
+                                            # If empty, try string representation and wrap it
+                                            if not function_args:
+                                                function_args = {"raw_args": str(args_obj)}
+                                        except Exception as attr_err:
+                                            log.warning(f"LLM Call [{llm_call_id}] - Error extracting attributes from direct function: {attr_err}")
+                                            function_args = {"raw_args": str(args_obj)}
+                                # Handle alternative property names for args (arguments)
+                                elif not hasattr(part_response.function_call, 'args') and hasattr(part_response.function_call, 'arguments'):
+                                    args_obj = part_response.function_call.arguments
+                                    log.info(f"LLM Call [{llm_call_id}] - Using 'arguments' instead of 'args' in function_call")
+                                    
+                                    # Apply the same parsing logic as for 'args' but with safer error handling
+                                    if isinstance(args_obj, dict):
+                                        function_args = args_obj
+                                    elif hasattr(args_obj, 'to_dict'):
+                                        try:
+                                            function_args = args_obj.to_dict()
+                                        except Exception as dict_err:
+                                            log.warning(f"LLM Call [{llm_call_id}] - Error calling to_dict() on arguments: {dict_err}")
+                                            # Fallback to safe attribute extraction
+                                            try:
+                                                function_args = {
+                                                    attr: getattr(args_obj, attr) 
+                                                    for attr in dir(args_obj) 
+                                                    if not attr.startswith('_') and not callable(getattr(args_obj, attr))
+                                                }
+                                            except Exception:
+                                                function_args = {"_extraction_failed": True}
+                                    elif isinstance(args_obj, str):
+                                        try:
+                                            import json
+                                            function_args = json.loads(args_obj)
+                                        except json.JSONDecodeError:
+                                            log.warning(f"LLM Call [{llm_call_id}] - Could not parse function arguments as JSON: {args_obj[:100] if len(args_obj) > 100 else args_obj}")
+                                            function_args = {"_original_args": args_obj}
+                                    else:
+                                        # Last resort extraction with safeguards
+                                        try:
+                                            # Try to safely extract attributes
+                                            props = {}
+                                            for attr in dir(args_obj):
+                                                if not attr.startswith('_') and not callable(getattr(args_obj, attr, None)):
+                                                    try:
+                                                        # Try to get each attribute individually
+                                                        val = getattr(args_obj, attr)
+                                                        # Only include values that are likely to be JSON serializable
+                                                        if val is None or isinstance(val, (str, int, float, bool, list, dict)):
+                                                            props[attr] = val
+                                                        else:
+                                                            props[attr] = f"<{type(val).__name__}>"
+                                                    except Exception:
+                                                        props[attr] = "<error>"
+                                            
+                                            if props:
+                                                function_args = props
+                                            else:
+                                                function_args = {"_no_extractable_props": True}
+                                        except Exception:
+                                            function_args = {"_extraction_failed": True}
+                                
+                                # Extract any property found in function_call if neither args nor arguments exists
+                                elif not hasattr(part_response.function_call, 'args') and not hasattr(part_response.function_call, 'arguments'):
+                                    log.warning(f"LLM Call [{llm_call_id}] - function_call has neither 'args' nor 'arguments' attributes")
+                                    # Last resort - extract all non-callable attributes with safeguards
+                                    try:
+                                        # First, collect property names without accessing values
+                                        prop_names = [
+                                            attr for attr in dir(part_response.function_call) 
+                                            if not attr.startswith('_') and not callable(getattr(part_response.function_call, attr, None))
+                                            and attr != 'name'  # Exclude name as we handle it separately
+                                        ]
+                                        
+                                        # Now safely extract each property
+                                        extracted_props = {}
+                                        for prop in prop_names:
+                                            try:
+                                                val = getattr(part_response.function_call, prop)
+                                                # Only include values that are likely to be JSON serializable
+                                                if val is None or isinstance(val, (str, int, float, bool, list, dict)):
+                                                    extracted_props[prop] = val
+                                                else:
+                                                    extracted_props[prop] = f"<{type(val).__name__}>"
+                                            except Exception:
+                                                extracted_props[prop] = "<error>"
+                                        
+                                        # If we found any properties, use them
+                                        if extracted_props:
+                                            log.info(f"LLM Call [{llm_call_id}] - Extracted properties from function_call: {list(extracted_props.keys())}")
+                                            function_args = extracted_props
+                                        else:
+                                            function_args = {"_no_extractable_props": True}
+                                    except Exception as e:
+                                        log.error(f"LLM Call [{llm_call_id}] - Failed to extract properties from function_call: {e}")
+                                        function_args = {"_extraction_failed": True}
+                                
+                                # Add a fallback if function_name is still None
+                                if function_name is None and hasattr(part_response.function_call, 'function_name'):
+                                    function_name = part_response.function_call.function_name
+                                    log.info(f"LLM Call [{llm_call_id}] - Used fallback 'function_name' property for direct function call")
+                                
+                                # Proceed only if we have a valid function name
+                                if function_name:
+                                    tool_call = {
+                                        "id": f"tc_{uuid.uuid4().hex[:8]}",
+                                        "function": {
+                                            "name": function_name,
+                                            "arguments": function_args
+                                        }
+                                    }
+                                    event_to_yield = {"type": "tool_calls", "content": [tool_call]}
+                                    all_chunks_for_cache.append(event_to_yield)
+                                    yield event_to_yield
+                                    log.info(f"LLM Call [{llm_call_id}] - Successfully processed direct tool call to {function_name}")
+                                else:
+                                    log.warning(f"LLM Call [{llm_call_id}] - Direct function call without name, skipping")
+                            except Exception as direct_fc_err:
+                                # Enhanced error reporting with detailed information about the function_call object
+                                log.error(f"LLM Call [{llm_call_id}] - Error processing direct function call: {direct_fc_err}", exc_info=True)
+                                
+                                # CRITICAL FIX: Only use type() of the object, never convert to string
+                                try:
+                                    fc_type = type(part_response.function_call).__name__
+                                    log.error(f"LLM Call [{llm_call_id}] - Direct function_call object type: {fc_type}")
+                                    
+                                    # Get safe debug info
+                                    debug_props = {
+                                        "error_type": type(direct_fc_err).__name__,
+                                        "error_message": str(direct_fc_err),
+                                        "function_call_type": fc_type,
+                                    }
+                                    
+                                    # Safely list attribute names only without accessing values
+                                    try:
+                                        props = [
+                                            prop for prop in dir(part_response.function_call) 
+                                            if not prop.startswith('_') and not callable(getattr(part_response.function_call, prop, None))
+                                        ]
+                                        debug_props["available_props"] = props
+                                    except Exception as prop_err:
+                                        debug_props["prop_error"] = str(prop_err)
+                                    
+                                    log.error(f"LLM Call [{llm_call_id}] - Direct function_call debug info: {debug_props}")
+                                except Exception as debug_err:
+                                    log.error(f"LLM Call [{llm_call_id}] - Failed to create debug info for direct function_call: {debug_err}")
+                                
+                                # Instead of failing completely, create a fallback error event
+                                error_event = {
+                                    "type": "error",
+                                    "content": {
+                                        "code": "DIRECT_FUNCTION_CALL_PARSE_ERROR",
+                                        "message": f"Could not process direct function call: {direct_fc_err}"
+                                    }
+                                }
+                                all_chunks_for_cache.append(error_event)
+                                yield error_event
+                    except Exception as e:
+                        # Create a safe error message that won't cause cascading issues
+                        error_msg = "Error processing stream part"
+                        error_details = "[Error details unavailable]"
+                        
+                        try:
+                            error_details = str(e)
+                        except Exception as str_e:
+                            error_details = f"Error contains unstringifiable object of type {type(e).__name__}"
+                        
+                        log.error(f"LLM Call [{llm_call_id}] - {error_msg}: {error_details}")
+                        log.error(f"LLM Call [{llm_call_id}] - Stream part type: {type(part_response)}")
+                        
+                        # Create safer debug representation using our robust function
+                        try:
+                            safe_part_repr = _safe_sdk_object_repr_for_log(part_response, max_len=300)
+                            log.error(f"LLM Call [{llm_call_id}] - Safe part representation: {safe_part_repr}")
+                            
+                            # Additional safe attribute checks
+                            safe_info = {
+                                "response_type": str(type(part_response)),
+                                "has_text": hasattr(part_response, "text"),
+                                "has_candidates": hasattr(part_response, "candidates"),
+                                "has_function_call": hasattr(part_response, "function_call"),
+                                "error": error_details
+                            }
+                            
+                            # If there's a function_call, add safe info about it too
+                            if hasattr(part_response, "function_call") and part_response.function_call:
+                                safe_info["function_call_repr"] = _safe_sdk_object_repr_for_log(part_response.function_call, max_len=200)
+                            
+                            log.error(f"LLM Call [{llm_call_id}] - Safe debug info: {safe_info}")
+                        except Exception as info_err:
+                            log.error(f"LLM Call [{llm_call_id}] - Failed to generate safe debug info: {info_err}")
+                        
+                        # CRITICAL: Don't fail the entire stream for a single error
+                        # Instead, yield an error for THIS chunk but continue processing
+                        event_to_yield = {
+                            "type": "error", 
+                            "content": {
+                                "code": "STREAM_PROCESSING_ERROR", 
+                                "message": str(e)
+                            }
+                        }
                         all_chunks_for_cache.append(event_to_yield)
                         yield event_to_yield
-                    
-                    # Check for function calls (tool calls) in candidates
-                    if hasattr(part_response, 'candidates') and part_response.candidates:
-                        for candidate in part_response.candidates:
-                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                                for content_part in candidate.content.parts:
-                                    # Handle text parts
-                                    if hasattr(content_part, 'text') and content_part.text:
-                                        event_to_yield = {"type": "text_chunk", "content": content_part.text}
-                                        all_chunks_for_cache.append(event_to_yield)
-                                        yield event_to_yield
-                                    # Handle function calls
-                                    elif hasattr(content_part, 'function_call') and content_part.function_call:
-                                        fc = content_part.function_call
-                                        event_to_yield = {
-                                            "type": "tool_calls", 
-                                            "content": [{
-                                                "id": f"call_{uuid.uuid4().hex[:8]}", # Generate a unique call ID
-                                                "type": "function",
-                                                "function": {"name": fc.name, "arguments": dict(fc.args) if hasattr(fc, 'args') else {}}
-                                            }]
-                                        }
-                                        all_chunks_for_cache.append(event_to_yield)
-                                        yield event_to_yield
-                
+
                 # --- Cache successful response --- 
                 if self.CACHE_ENABLED and cache_key and all_chunks_for_cache:
                     if len(self.response_cache) >= self.CACHE_MAX_SIZE:
